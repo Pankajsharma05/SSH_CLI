@@ -235,12 +235,9 @@ a proper `sbatch` submitter.
 
 ## Credits
 
-**Pankaj Sharma** — initial author, and the visionary behind SSH_CLI: the idea,
-the cluster workflows it is shaped around, the feature direction, and every
-design decision about what this tool should be.
 
 The implementation was written with **[Claude Code](https://claude.com/claude-code)**
-(Anthropic) pair-programming against that vision.
+(Anthropic) pair-programming.
 
 Third-party components, each under its own license:
 [Tauri](https://tauri.app) (MIT/Apache-2.0) ·
