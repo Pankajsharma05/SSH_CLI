@@ -357,6 +357,9 @@ pub fn transfer(
     Ok(())
 }
 
+/// Only the rsync engine needs this, and rsync is not available on
+/// Windows — so there the function would be dead code.
+#[cfg(not(windows))]
 fn side_path(s: &Side) -> &str {
     match s {
         Side::Local(p) => p,
@@ -649,7 +652,7 @@ pub fn chmod_local(path: &str, mode: &str) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     {
-        let _ = bits;
+        let _ = (bits, path);
         Err("chmod is unix-only".into())
     }
 }
