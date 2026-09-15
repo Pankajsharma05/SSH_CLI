@@ -739,3 +739,11 @@ table.jobs-tbl td {
 :root[data-theme="light"] .cm-s-sshcli .cm-atom,
 :root[data-theme="light"] .cm-s-sshcli .cm-meta { color: #8b3fc9; }
 :root[data-theme="light"] .cm-s-sshcli .cm-builtin { color: #0e8a72; }
+
+/* ---------- authentication prompts (Windows transport) ---------- */
+.auth-modal { min-width: 420px; max-width: 520px; }
+.auth-modal .auth-host {
+  font-family: var(--font-mono); font-size: .78rem;
+  color: var(--accent); margin-bottom: 8px;
+}
+.auth-modal input { width: 100%; font-size: .95rem; padding: 8px 10px; }

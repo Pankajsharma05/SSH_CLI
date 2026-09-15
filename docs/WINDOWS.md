@@ -1,118 +1,96 @@
 # SSH_CLI on Windows
 
-Windows is supported, with one architectural difference you need to
-know about before the file panes will work.
+Windows is supported, and — unlike the Unix builds — it does not drive
+`ssh.exe` for file work at all. It speaks SSH **in the app**, the way
+WinSCP does.
 
-## The short version
+## Why it works differently here
 
-**Set up an SSH key and load it into the Windows ssh-agent service.**
-Terminal tabs work with passwords and 2FA exactly as on macOS and
-Linux, but the file panes, transfers and the SLURM panel need key-based
-authentication. The rest of this page explains why, and how.
+On macOS and Linux every `ssh`/`scp` the app runs attaches to an OpenSSH
+`ControlMaster` socket, so the first login opens a master connection and
+every later listing, stat and transfer rides it. Log in once in a
+terminal tab — password, 2FA, whatever the cluster wants — and the rest
+of the app is authenticated for free.
 
-## Why keys are required here and not elsewhere
+Microsoft's OpenSSH port has never implemented multiplexing: the control
+socket is a Unix domain socket and `ssh.exe` has no equivalent. The
+options are accepted and silently do nothing. (Worse, a `Host *` stanza
+in `~/.ssh/config` that turns `ControlMaster` on — common if you also use
+SSH from WSL or a Mac — makes `ssh.exe` try anyway and abort with
+`getsockname failed: Not a socket`.)
 
-SSH_CLI is built on connection reuse. On macOS and Linux it passes
-`ControlMaster=auto` to every `ssh` and `scp` it runs, so the first
-login opens a master connection and everything afterwards — every
-directory listing, every `stat`, every transfer — rides that already
-authenticated session. That is what makes logging in once in a terminal
-tab enough for the whole app, password or OTP included.
+So the Windows build does not try. It opens **one TCP connection per
+host with libssh2 inside the process**, authenticates once, and then
+multiplexes channels over it:
 
-Microsoft's OpenSSH port has never implemented multiplexing. The
-control socket is a Unix domain socket, and `ssh.exe` has no equivalent.
-The options are accepted and silently do nothing; worse, if your
-`~/.ssh/config` sets `ControlMaster`/`ControlPath` in a `Host *` stanza
-(common if you also use SSH from WSL, Git Bash or a Mac), `ssh.exe`
-tries anyway and dies with `getsockname failed: Not a socket`. SSH_CLI
-passes an explicit `-o ControlMaster=no -o ControlPath=none` on Windows
-so your global config cannot break the app's own connections.
+* an **SFTP channel** for every file operation — listings arrive as
+  structured attributes, not parsed `ls`/`find` output;
+* **exec channels** for the few genuine shell commands (`df`, `squeue`,
+  `scontrol`, filename search).
 
-In place of ControlMaster, the Windows build keeps **one long-lived
-`ssh.exe` per host** running a shell on the far end, and writes framed
-commands into its stdin (`src-tauri/src/mux.rs`). That recovers the
-important property — one TCP handshake and one authentication per host,
-so browsing stays fast — but the shell's stdin is a pipe, not a
-terminal, so it cannot answer a password or verification-code prompt.
-Hence: keys.
+Because the app owns the connection, it owns the login conversation too.
+That has a pleasant consequence: **passwords, key passphrases and
+one-time codes all work**, prompted in the app itself. You do not need
+to set up keys first, and nothing re-authenticates behind your back.
 
-File transfers still run `scp.exe` as a separate process and
-authenticate again per transfer. With an agent-held key that is
-invisible; without one it is a prompt you cannot answer.
+## What you will see
 
-## Setting up a key
+The first time a pane touches a host:
 
-From any PowerShell prompt:
+1. **Host key** — on first contact the app shows the server's SHA256
+   fingerprint and asks whether to trust it. Check it against what your
+   administrators publish. Accepting writes an entry to
+   `%USERPROFILE%\.ssh\known_hosts`, the same file `ssh.exe` uses. If a
+   *known* key ever changes, the connection is refused outright and you
+   are told why.
+2. **Authentication**, in the order OpenSSH would try it:
+   the `ssh-agent` service → the key configured on the session (asking
+   for its passphrase only if the key is encrypted) → keyboard-interactive
+   (this is the 2FA/OTP path) → password.
+3. That is the last time you are asked. The session stays open, and
+   browsing, editing, transfers and the queue panel all use it.
 
-```powershell
-# 1. make a key (press Enter through the prompts, or set a passphrase)
-ssh-keygen -t ed25519
+Keys are still the nicest way to live — `ssh-keygen -t ed25519`, then
+`Get-Service ssh-agent | Set-Service -StartupType Automatic`,
+`Start-Service ssh-agent`, `ssh-add $env:USERPROFILE\.ssh\id_ed25519` —
+but they are no longer required.
 
-# 2. turn on the agent so the passphrase is asked at most once per boot
-Get-Service ssh-agent | Set-Service -StartupType Automatic
-Start-Service ssh-agent
-ssh-add $env:USERPROFILE\.ssh\id_ed25519
+## What this buys you over the Unix builds
 
-# 3. install the public half on the server (one password prompt, here)
-type $env:USERPROFILE\.ssh\id_ed25519.pub |
-  ssh USER@HOST "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
-```
+| | Unix (OpenSSH) | Windows (in-process) |
+| --- | --- | --- |
+| Listings | GNU `find -printf`, parsed | SFTP attributes — works on servers without GNU coreutils |
+| Transfer progress | scraped from scp's meter | real byte counts |
+| "Is it connected?" | `ssh -O check` on a socket | a live object in memory |
+| Auth prompts | in a terminal tab | in the app |
 
-Check it took:
+## Remaining differences on Windows
 
-```powershell
-ssh -o BatchMode=yes USER@HOST true   # silence means success
-```
+| Area | Behaviour |
+| --- | --- |
+| **Terminal tabs** | Still run `ssh.exe` under ConPTY, so opening a terminal to a host authenticates **separately** from the file panes — on a 2FA cluster that is a second code. Moving terminals onto the shared session is the next piece of work |
+| **ProxyJump** | Not supported by the in-process transport yet. Sessions with a bastion are refused with a clear message; use WSL2 for those |
+| **rsync engine** | Unavailable; the queue uses SFTP, which is resumable in practice anyway |
+| **Servers without SFTP** | Refused. Every modern OpenSSH ships the SFTP subsystem, but a locked-down host that disables it needs the Unix build |
+| Local terminal tabs | ConPTY running PowerShell 7 if present, else Windows PowerShell, else `cmd.exe` |
+| `chmod` on local files | Not offered; POSIX mode bits have no meaning on NTFS. Remote `chmod` works (SFTP `SETSTAT`) |
+| Local disk-free footer | `GetDiskFreeSpaceExW` instead of `df` |
+| Local places menu | Every mounted drive, alongside Home/Desktop/Documents/Downloads |
+| Local paths | `C:\Users\you\...`; breadcrumbs start at the drive |
+| Console windows | Suppressed (`CREATE_NO_WINDOW`), so listings do not flash a black box |
 
-If that command prints `Permission denied`, SSH_CLI's file panes will
-fail the same way, and the app's error message will say so.
+## Which `ssh.exe` terminal tabs use
 
-### If your cluster requires 2FA on every login
-
-Some sites reject key-only authentication or demand an OTP each time.
-There is no way around that on Windows today: without multiplexing,
-every operation is a fresh login, and prompting per directory listing is
-not usable. Options, in order of how well they work:
-
-1. Ask whether the site allows key-based access from a registered
-   machine — many do, and that is what the Linux/macOS builds are
-   effectively relying on once the master is up.
-2. Run SSH_CLI inside WSL2 (it is the normal Linux build there, with
-   full ControlMaster support) and use WSLg to display it.
-3. Use terminal tabs only — they prompt interactively and work fine.
-
-## Which `ssh.exe` gets used
-
-SSH_CLI prefers `%SystemRoot%\System32\OpenSSH\ssh.exe` over whatever
-is first on `PATH`. This matters: `ssh` on a developer's PATH is very
-often Git for Windows' MSYS2 build, which cannot talk to the Windows
-`ssh-agent` service, because that agent lives behind a named pipe the
-MSYS2 binary does not speak. Preferring the inbox client is what makes
-agent-held keys actually work.
-
-If OpenSSH is missing entirely:
+Terminals prefer `%SystemRoot%\System32\OpenSSH\ssh.exe` over whatever is
+first on `PATH`, because `ssh` on a developer's `PATH` is often Git for
+Windows' MSYS2 build, which cannot reach the Windows `ssh-agent` named
+pipe. If OpenSSH is missing entirely:
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
 ```
 
-## Other differences from the Unix builds
-
-| Area | Behaviour on Windows |
-| --- | --- |
-| Local terminal tabs | ConPTY, running PowerShell 7 if present, else Windows PowerShell, else `cmd.exe` |
-| rsync transfer engine | Unavailable — the queue silently uses `scp`. There is no rsync in the OpenSSH package, and a Git-Bash rsync mangles drive-letter paths |
-| `chmod` on local files | Not offered; POSIX mode bits have no meaning on NTFS. Remote `chmod` works normally |
-| Local disk-free footer | Reads `GetDiskFreeSpaceExW` instead of `df` |
-| Local places menu | Adds every mounted drive alongside Home/Desktop/Documents/Downloads |
-| Local file paths | `C:\Users\you\...`; the breadcrumb bar starts at the drive rather than `/` |
-| Console windows | Suppressed (`CREATE_NO_WINDOW`) — without this every directory listing would flash a black window |
-
 ## Building
-
-See `build_windows.ps1`. You need Rust with the MSVC toolchain, the
-Visual Studio "Desktop development with C++" workload, and the WebView2
-runtime (already present on Windows 11 and current Windows 10).
 
 ```powershell
 .\build_windows.ps1              # -> dist\ssh_cli.exe
@@ -120,16 +98,18 @@ runtime (already present on Windows 11 and current Windows 10).
 .\build_windows.ps1 -Install     # copy to %LOCALAPPDATA% + Start menu
 ```
 
-Tagged releases build this automatically on a `windows-latest` runner,
-so you do not need a Windows machine to produce a binary.
+You need Rust with the MSVC toolchain, the Visual Studio "Desktop
+development with C++" workload (libssh2 is built from source, with the
+native WinCNG crypto — no OpenSSL), and the WebView2 runtime, which is
+already on Windows 11 and current Windows 10.
 
-## The long-term fix
+Tagged releases build this on a `windows-latest` runner, so you do not
+need a Windows machine to produce a binary.
 
-All of the above is a consequence of shelling out to the system OpenSSH
-client. The planned v2 transport — [russh](https://github.com/Eugeny/russh)
-with native SFTP channels — opens one TCP connection, authenticates
-once, and multiplexes channels itself, in-process. That removes the
-external `ssh`/`scp` dependency on every platform and makes Windows a
-first-class target with interactive password and keyboard-interactive
-auth, because the app would own the prompt. It also makes transfers
-pipelined rather than one `scp` per file.
+## Where this is heading
+
+The in-process transport is currently Windows-only; Linux and macOS keep
+the OpenSSH path that has been shipping. If it proves itself here, the
+same transport on every platform would remove the external `ssh`/`scp`
+dependency altogether, and bring real transfer progress and in-app
+authentication everywhere.

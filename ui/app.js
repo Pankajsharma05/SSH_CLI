@@ -678,6 +678,7 @@ async function boot() {
   wireTerminalEvents();
   wireEditEvents();
   wireFileDrop();
+  wireAuthPrompts();
   document.addEventListener("keydown", onKeyDown, true);
 
   $("#btn-rsync").classList.toggle("toggled", !!ui.settings.rsync);

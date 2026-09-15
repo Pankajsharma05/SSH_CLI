@@ -73,11 +73,18 @@ fn ssh_check(t: &Target, remote_cmd: &str) -> Result<(), String> {
 }
 
 pub fn remote_home(t: &Target) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        return crate::mux::home(t);
+    }
+    #[cfg(not(windows))]
+    {
     let out = ssh_output(t, "pwd")?;
     if !out.status.success() {
         return Err(auth_hint(&out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
 }
 
 fn auth_hint(stderr: &[u8]) -> String {
@@ -109,6 +116,16 @@ fn auth_hint(stderr: &[u8]) -> String {
 /// spaces in names). %Y dereferences symlinks so links to directories
 /// stay navigable.
 pub fn remote_list(t: &Target, path: &str) -> Result<Vec<Entry>, String> {
+    // SFTP hands back structured attributes, so the Windows build needs
+    // neither GNU find nor any particular userland on the server.
+    #[cfg(windows)]
+    {
+        let mut entries = crate::mux::list_dir(t, path)?;
+        sort_entries(&mut entries);
+        return Ok(entries);
+    }
+    #[cfg(not(windows))]
+    {
     let cmd = format!(
         "cd -- {} && find . -mindepth 1 -maxdepth 1 -printf '%y\\t%Y\\t%s\\t%T@\\t%m\\t%u\\t%f\\n'",
         sh_quote(path)
@@ -143,6 +160,7 @@ pub fn remote_list(t: &Target, path: &str) -> Result<Vec<Entry>, String> {
     }
     sort_entries(&mut entries);
     Ok(entries)
+    }
 }
 
 pub fn local_list(path: &str) -> Result<Vec<Entry>, String> {
@@ -196,14 +214,23 @@ fn sort_entries(entries: &mut [Entry]) {
 }
 
 pub fn remote_mkdir(t: &Target, path: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    return crate::mux::mkdir(t, path);
+    #[cfg(not(windows))]
     ssh_check(t, &format!("mkdir -p -- {}", sh_quote(path)))
 }
 
 pub fn remote_delete(t: &Target, path: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    return crate::mux::remove(t, path);
+    #[cfg(not(windows))]
     ssh_check(t, &format!("rm -rf -- {}", sh_quote(path)))
 }
 
 pub fn remote_rename(t: &Target, from: &str, to: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    return crate::mux::rename(t, from, to);
+    #[cfg(not(windows))]
     ssh_check(t, &format!("mv -- {} {}", sh_quote(from), sh_quote(to)))
 }
 
@@ -223,6 +250,7 @@ pub type XferHandle = std::sync::Arc<std::sync::Mutex<Option<std::process::Child
 /// Run scp/rsync in a background thread; stream output lines as
 /// `xfer-log` events and finish with `xfer-done`. The child handle is
 /// stored in `handle` so the transfer can be cancelled.
+#[cfg(not(windows))]
 pub fn transfer(
     app: AppHandle,
     id: u64,
@@ -357,9 +385,99 @@ pub fn transfer(
     Ok(())
 }
 
-/// Only the rsync engine needs this, and rsync is not available on
-/// Windows — so there the function would be dead code.
-#[cfg(not(windows))]
+/// Transfers over the in-process SFTP session.
+///
+/// Unlike the Unix path this is not a child process, so progress is real
+/// byte counts rather than scraped from scp's meter, and cancelling sets
+/// a flag the copy loop checks instead of killing a process.
+#[cfg(windows)]
+pub fn transfer(
+    app: AppHandle,
+    id: u64,
+    sources: Vec<Side>,
+    dest: Side,
+    _engine: &str,
+    _handle: XferHandle,
+) -> Result<(), String> {
+    std::thread::spawn(move || {
+        crate::mux::clear_cancel(id);
+        let emit = |line: String| {
+            let _ = app.emit("xfer-log", XferEvent { id, line });
+        };
+
+        // Size everything first so the bar is honest.
+        let mut total = 0u64;
+        for s in &sources {
+            total += match s {
+                Side::Local(p) => crate::mux::local_size(std::path::Path::new(p)),
+                Side::Remote(t, p) => crate::mux::remote_size(t, p),
+            };
+        }
+
+        let mut prog = crate::mux::Progress {
+            app: &app,
+            id,
+            label: String::new(),
+            done: 0,
+            total,
+        };
+
+        let mut ok = true;
+        for src in &sources {
+            let raw = side_path(src);
+            let name = raw.trim_end_matches('/').rsplit('/').next().unwrap_or("item");
+            let name = if name.is_empty() { "item" } else { name };
+            prog.label = name.to_string();
+            emit(format!("{name}…"));
+
+            let result = match (src, &dest) {
+                (Side::Local(from), Side::Remote(t, to)) => crate::mux::upload(
+                    t,
+                    std::path::Path::new(from),
+                    &join_remote(to, name),
+                    &mut prog,
+                ),
+                (Side::Remote(t, from), Side::Local(to)) => {
+                    crate::mux::download(t, from, &std::path::Path::new(to).join(name), &mut prog)
+                }
+                (Side::Remote(ft, from), Side::Remote(tt, to)) => {
+                    // Server to server stages through a temp file here, the
+                    // same way scp -3 routes the bytes through this machine.
+                    let tmp = std::env::temp_dir().join(format!("ssh_cli_relay_{id}_{name}"));
+                    let r = crate::mux::download(ft, from, &tmp, &mut prog).and_then(|_| {
+                        prog.done = 0;
+                        crate::mux::upload(tt, &tmp, &join_remote(to, name), &mut prog)
+                    });
+                    let _ = std::fs::remove_file(&tmp);
+                    r
+                }
+                (Side::Local(_), Side::Local(_)) => {
+                    Err("at least one side must be remote".to_string())
+                }
+            };
+            if let Err(e) = result {
+                emit(e);
+                ok = false;
+                break;
+            }
+        }
+        crate::mux::clear_cancel(id);
+        let _ = app.emit("xfer-done", XferDone { id, ok });
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
+fn join_remote(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Names each item for the progress line, and on Unix also tells the
+/// rsync engine whether a path is safe to hand it.
 fn side_path(s: &Side) -> &str {
     match s {
         Side::Local(p) => p,
@@ -639,6 +757,12 @@ pub fn chmod_remote(t: &Target, path: &str, mode: &str) -> Result<(), String> {
     if !mode.chars().all(|c| c.is_ascii_digit()) || mode.is_empty() || mode.len() > 4 {
         return Err("mode must be octal digits, e.g. 644 or 755".into());
     }
+    #[cfg(windows)]
+    {
+        let bits = u32::from_str_radix(mode, 8).map_err(|_| "mode must be octal")?;
+        return crate::mux::chmod(t, path, bits);
+    }
+    #[cfg(not(windows))]
     ssh_check(t, &format!("chmod {} -- {}", mode, sh_quote(path)))
 }
 
@@ -690,18 +814,36 @@ pub fn compress_download(
         }
         emit("downloading archive…".into());
         let local_tmp = std::env::temp_dir().join(format!("ssh_cli_{id}.tar.gz"));
-        let mut args = match scp_args(&t) {
-            Ok(a) => a,
-            Err(e) => return fail(&app, e),
+
+        // Windows pulls the archive down the session we already have,
+        // instead of authenticating a fresh scp.exe.
+        #[cfg(windows)]
+        let ok = {
+            let total = crate::mux::remote_size(&t, &remote_tmp);
+            let mut prog = crate::mux::Progress {
+                app: &app,
+                id,
+                label: "archive".into(),
+                done: 0,
+                total,
+            };
+            crate::mux::download(&t, &remote_tmp, &local_tmp, &mut prog).is_ok()
         };
-        args.push(format!("{}:{}", t.destination, remote_tmp));
-        args.push(local_tmp.to_string_lossy().into_owned());
-        let ok = plat::cmd(&plat::scp_exe())
-            .args(&args)
-            .stdin(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        #[cfg(not(windows))]
+        let ok = {
+            let mut args = match scp_args(&t) {
+                Ok(a) => a,
+                Err(e) => return fail(&app, e),
+            };
+            args.push(format!("{}:{}", t.destination, remote_tmp));
+            args.push(local_tmp.to_string_lossy().into_owned());
+            plat::cmd(&plat::scp_exe())
+                .args(&args)
+                .stdin(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
         let _ = ssh_check(&t, &format!("rm -f -- {}", sh_quote(&remote_tmp)));
         if !ok {
             let _ = std::fs::remove_file(&local_tmp);
@@ -729,19 +871,26 @@ const EDIT_MAX: usize = 2_000_000;
 
 /// Read a remote text file for the built-in editor (UTF-8, size-capped).
 pub fn remote_read_text(t: &Target, path: &str) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        return text_guard(crate::mux::read_file(t, path, EDIT_MAX)?);
+    }
+    #[cfg(not(windows))]
+    {
     let cmd = format!("head -c {} -- {}", EDIT_MAX + 1, sh_quote(path));
     let out = ssh_output(t, &cmd)?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     text_guard(out.stdout)
+    }
 }
 
 /// Write the built-in editor's buffer back to a remote file, atomically
 /// enough for job scripts: write to a temp file, then mv into place.
 #[cfg(windows)]
 pub fn remote_write_text(t: &Target, path: &str, data: &str) -> Result<(), String> {
-    crate::mux::write_file(t, path, data)
+    crate::mux::write_file(t, path, data.as_bytes())
 }
 
 #[cfg(not(windows))]
@@ -849,6 +998,12 @@ pub fn local_read_bytes(path: &str) -> Result<Vec<u8>, String> {
 /// mtime + size of a remote file — drives the viewer's auto-refresh.
 /// GNU stat first (Linux servers), BSD stat as fallback.
 pub fn remote_stat(t: &Target, path: &str) -> Result<(u64, u64), String> {
+    #[cfg(windows)]
+    {
+        return crate::mux::stat(t, path);
+    }
+    #[cfg(not(windows))]
+    {
     let q = sh_quote(path);
     let cmd = format!("stat -c '%Y %s' -- {q} 2>/dev/null || stat -f '%m %z' {q}");
     let out = ssh_output(t, &cmd)?;
@@ -858,6 +1013,7 @@ pub fn remote_stat(t: &Target, path: &str) -> Result<(u64, u64), String> {
     match (parse(it.next()), parse(it.next())) {
         (Some(m), Some(s)) => Ok((m, s)),
         _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
     }
 }
 

@@ -168,6 +168,68 @@ function modal({ title, message, fields = [], okLabel = "OK", danger = false, bo
 const confirmModal = (title, message, okLabel = "Delete") =>
   modal({ title, message, okLabel, danger: true }).then((r) => r !== null);
 const alertModal = (title, message) => modal({ title, message, okLabel: "OK" });
+
+// ---------------------------------------------------------------- auth prompts
+// The Windows transport speaks SSH in-process, so *it* has to ask for
+// passwords, key passphrases and 2FA codes — there is no terminal for
+// the server to prompt through. Rust raises `auth-prompt`, we answer
+// with the `auth_reply` command. Challenges are queued: a server may ask
+// twice (password, then one-time code) and the second question must not
+// overwrite the first.
+let authQueue = Promise.resolve();
+
+function wireAuthPrompts() {
+  listen("auth-prompt", (ev) => {
+    const p = ev.payload || {};
+    authQueue = authQueue.then(() => askAuth(p)).catch(() => {});
+  });
+}
+
+function askAuth(p) {
+  return new Promise((resolve) => {
+    const done = (text) => {
+      closeModal();
+      inv("auth_reply", { id: p.id, text }).catch(() => {});
+      resolve();
+    };
+
+    const root = $("#modal-root");
+    root.innerHTML = "";
+    const box = el("div", "modal auth-modal");
+    box.appendChild(el("h3", null, p.title || "Authentication"));
+    if (p.target) box.appendChild(el("div", "auth-host", p.target));
+    if (p.prompt) box.appendChild(el("div", "msg", p.prompt));
+
+    let input = null;
+    if (p.kind !== "hostkey") {
+      const row = el("div", "row");
+      input = el("input");
+      // echo=false is the server telling us this is a secret.
+      input.type = p.echo ? "text" : "password";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      row.appendChild(input);
+      box.appendChild(row);
+    }
+
+    const actions = el("div", "actions");
+    const cancel = el("button", "btn", "Cancel");
+    const ok = el("button", "btn primary",
+      p.kind === "hostkey" ? "Trust this host" : "OK");
+    cancel.onclick = () => done(null);
+    ok.onclick = () => done(p.kind === "hostkey" ? "yes" : (input ? input.value : ""));
+    actions.append(cancel, ok);
+    box.appendChild(actions);
+
+    root.appendChild(box);
+    root.classList.remove("hidden");
+    setTimeout(() => (input || ok).focus(), 30);
+    box.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); ok.click(); }
+      if (e.key === "Escape") { e.preventDefault(); cancel.click(); }
+    });
+  });
+}
 const modalOpen = () => !$("#modal-root").classList.contains("hidden");
 const closeModal = () => {
   $("#modal-root").classList.add("hidden");

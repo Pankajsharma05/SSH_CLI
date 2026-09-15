@@ -12,17 +12,26 @@ All notable changes to SSH_CLI are documented here. The format follows
 - `plat.rs` — one home for platform differences: which `ssh.exe` to run,
   spawning children without flashing console windows, default-app openers,
   the local shell, and free-space queries.
-- `mux.rs` — connection reuse on Windows, where `ControlMaster` does not exist.
-  One persistent `ssh.exe` per host runs a shell on the far end and commands
-  are framed into its stdin, so the session still costs one handshake and one
-  authentication instead of one per directory listing.
+- `mux.rs` — an **in-process SSH transport** for Windows, where `ControlMaster`
+  does not exist. libssh2 opens one connection per host and multiplexes an
+  SFTP channel plus exec channels over it, the way WinSCP does. Because the
+  app owns the connection it also owns the login: **passwords, key
+  passphrases and keyboard-interactive 2FA are prompted in the app**, so
+  Windows no longer requires key-based authentication.
+- File operations on Windows are SFTP requests rather than shell commands:
+  listings use directory attributes (no GNU `find` dependency), transfers
+  report real byte progress and can be cancelled mid-copy, and `chmod` is
+  an SFTP `SETSTAT`.
+- Host keys are checked against `%USERPROFILE%\.ssh\known_hosts`, with a
+  fingerprint prompt on first contact and a hard refusal if a known key
+  changes.
 - Local terminal tabs run PowerShell 7 → Windows PowerShell → `cmd.exe`
   through ConPTY, rather than `portable-pty`'s `cmd.exe` default.
 - The local pane understands `C:\...` paths: breadcrumbs start at the drive,
   the places menu lists every mounted drive, and the free-space footer reads
   `GetDiskFreeSpaceExW`.
-- [`docs/WINDOWS.md`](docs/WINDOWS.md) — why the file panes need an SSH key
-  there, how to set one up, and what else differs.
+- [`docs/WINDOWS.md`](docs/WINDOWS.md) — how the in-process transport works
+  and what still differs from the Unix builds.
 
 ### Fixed
 - Windows OpenSSH aborts with `getsockname failed: Not a socket` when a user's
@@ -35,9 +44,11 @@ All notable changes to SSH_CLI are documented here. The format follows
   went unused.
 
 ### Known limitations on Windows
-- The file panes require key-based authentication; passwords and 2FA work in
-  terminal tabs only.
-- The `rsync` transfer engine is unavailable and falls back to `scp`.
+- Terminal tabs still run `ssh.exe`, so they authenticate separately from the
+  file panes — a second 2FA code on clusters that demand one.
+- ProxyJump bastions are not supported by the in-process transport yet.
+- Servers with the SFTP subsystem disabled are refused.
+- The `rsync` transfer engine is unavailable; SFTP is used instead.
 - Local `chmod` is not offered (no POSIX mode bits on NTFS).
 
 ## [1.0.0] — 2026-09-15

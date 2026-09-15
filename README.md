@@ -145,14 +145,19 @@ with C++" workload, and the OpenSSH client (`Add-WindowsCapability -Online
 -Name OpenSSH.Client~~~~0.0.1.0`). Tagged releases also publish a prebuilt
 `.exe` and an NSIS installer.
 
-**Read [`docs/WINDOWS.md`](docs/WINDOWS.md) first.** One thing works
-differently: Windows' OpenSSH has no `ControlMaster` multiplexing, which is
-the mechanism the Unix builds use to turn one interactive login into
-authentication for the whole session. The Windows build keeps a persistent
-`ssh.exe` shell per host instead, which restores the speed but cannot answer a
-password prompt — so **the file panes need an SSH key in the Windows ssh-agent**.
-Terminal tabs still take passwords and 2FA normally. Running the Linux build
-inside WSL2 remains an alternative if your cluster forbids key auth.
+**Read [`docs/WINDOWS.md`](docs/WINDOWS.md) first.** The Windows build works
+differently under the hood: Windows' OpenSSH has no `ControlMaster`
+multiplexing, so instead of driving `ssh.exe`, it speaks SSH **in-process**
+with libssh2 and runs **SFTP channels** over one authenticated connection —
+the same approach WinSCP takes. Because the app owns the login conversation,
+**passwords, key passphrases and 2FA codes are prompted in the app** and
+nothing needs keys set up in advance. Listings come from SFTP attributes
+rather than GNU `find`, and transfers report real byte progress.
+
+One wrinkle remains: terminal tabs still run `ssh.exe`, so opening a terminal
+authenticates separately from the file panes — on a 2FA cluster, a second
+code. ProxyJump bastions are not supported by that transport yet; use WSL2
+for those.
 
 ---
 
@@ -225,7 +230,7 @@ src-tauri/src/
   ops.rs      listings, transfers, cluster places, host facts, file IO
   target.rs   session -> ssh flags (ControlMaster, -J, -i, -p)
   plat.rs     platform differences: ssh binary, openers, shells, disks
-  mux.rs      Windows only — persistent ssh shell, standing in for
+  mux.rs      Windows only — in-process SSH + SFTP, standing in for
               ControlMaster (one auth per host, framed commands)
   config.rs   sessions.toml, UI state, ~/.ssh/config import
   edit.rs     external-editor watch/upload loop

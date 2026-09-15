@@ -21,6 +21,12 @@ toml = "0.8"
 dirs = "5"
 portable-pty = "0.8"
 
+# The Windows build speaks SSH in-process (see src/mux.rs), because
+# Windows OpenSSH cannot multiplex a connection. libssh2 uses the native
+# WinCNG crypto there, so this pulls in no OpenSSL.
+[target.'cfg(windows)'.dependencies]
+ssh2 = "0.9"
+
 [profile.release]
 opt-level = 3
 lto = true

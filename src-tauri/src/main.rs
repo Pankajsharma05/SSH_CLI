@@ -357,6 +357,8 @@ async fn start_transfer(
 
 #[tauri::command]
 async fn xfer_cancel(state: tauri::State<'_, AppState>, id: u64) -> Result<(), String> {
+    #[cfg(windows)]
+    mux::cancel(id);
     if let Some(h) = state.transfers.lock().unwrap().get(&id) {
         if let Some(c) = h.lock().unwrap().as_mut() {
             let _ = c.kill();
@@ -545,6 +547,20 @@ async fn fwd_list(state: tauri::State<'_, AppState>) -> Result<Vec<fwd::ForwardI
         .collect())
 }
 
+/// Answer a password / passphrase / 2FA challenge raised by the Windows
+/// transport. `text` of null means the user cancelled.
+///
+/// Sync on purpose: async commands share the tokio worker pool with the
+/// operation that is blocked waiting for this reply, and on a busy pool
+/// that is a deadlock waiting to happen. Sync commands run on the main
+/// thread and always get through.
+#[tauri::command]
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn auth_reply(id: u64, text: Option<String>) {
+    #[cfg(windows)]
+    mux::answer(id, text);
+}
+
 // ---------- ui state + ssh config import ----------
 
 #[tauri::command]
@@ -594,9 +610,24 @@ async fn forget_host_key(target: String) -> Result<String, String> {
     Ok(log)
 }
 
+/// Hand the in-process transport an `AppHandle`, so it can raise auth
+/// prompts from worker threads that have none of their own.
+#[cfg(windows)]
+fn init_transport(app: &mut tauri::App) {
+    use tauri::Manager;
+    mux::init(app.handle().clone());
+}
+
+#[cfg(not(windows))]
+fn init_transport(_app: &mut tauri::App) {}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|app| {
+            init_transport(app);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             sessions_list,
             session_add,
@@ -635,6 +666,7 @@ fn main() {
             fwd_start,
             fwd_stop,
             fwd_list,
+            auth_reply,
             ui_load,
             ui_save,
             ssh_config_import
