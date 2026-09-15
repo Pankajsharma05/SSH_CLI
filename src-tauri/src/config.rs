@@ -43,6 +43,9 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(base.join("ssh_cli").join("sessions.toml"))
 }
 
+/// Directory holding the ControlMaster sockets. Unix only — Windows
+/// OpenSSH cannot multiplex, so there is no socket to place.
+#[cfg(not(windows))]
 pub fn socket_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
     let dir = home.join(".ssh").join("ssh_cli_sockets");

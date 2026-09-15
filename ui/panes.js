@@ -374,7 +374,12 @@ function hidePathEditor(pane) {
 
 function renderCrumbs(pane) {
   pane.crumbs.innerHTML = "";
-  const parts = pane.path.split("/").filter(Boolean);
+  // A Windows local pane has no single "/" root — each drive is its
+  // own tree, so the first crumb is the drive rather than a slash.
+  const win = winPath(pane.path);
+  const sep = win ? "\\" : "/";
+  const parts = pane.path.split(/[\\/]/).filter(Boolean);
+  const drive = win ? parts.shift() : null;
   const mk = (label, path, last) => {
     const c = el("span", "crumb" + (last ? " last" : ""), label);
     c.onclick = () => { if (!last) loadPane(pane, path); };
@@ -388,11 +393,18 @@ function renderCrumbs(pane) {
     };
     pane.crumbs.appendChild(c);
   };
-  mk("/", "/", parts.length === 0);
-  let acc = "";
+  let acc;
+  if (win) {
+    acc = drive + sep;
+    mk(drive, acc, parts.length === 0);
+    acc = drive;
+  } else {
+    mk("/", "/", parts.length === 0);
+    acc = "";
+  }
   parts.forEach((p, i) => {
-    acc += "/" + p;
-    if (i) pane.crumbs.appendChild(el("span", "crumb-sep", "›"));
+    acc += sep + p;
+    if (i || win) pane.crumbs.appendChild(el("span", "crumb-sep", "›"));
     mk(p, acc, i === parts.length - 1);
   });
   const edit = el("span", "crumb-edit", "✎");
@@ -1022,7 +1034,7 @@ function startTransfer(from, to, names, destDir) {
   }
   const sources = names.map((n) => ({ target: from.target, path: joinPath(from.path, n) }));
   const dir = destDir || to.path;
-  const dest = { target: to.target, path: dir.endsWith("/") ? dir : dir + "/" };
+  const dest = { target: to.target, path: /[\\/]$/.test(dir) ? dir : dir + sepOf(dir) };
   const desc = `${from.target || "local"} → ${to.target || "local"}: ${names.join(", ")}`;
   startTransferRaw(sources, dest, desc,
     () => loadPane(to, to.path),
@@ -1129,7 +1141,7 @@ function wireFileDrop() {
       if (pane.target === null) return toast("drop onto the server pane to upload");
       const names = paths.map((p) => baseName(p));
       const sources = paths.map((p) => ({ target: null, path: p }));
-      const dest = { target: pane.target, path: pane.path.endsWith("/") ? pane.path : pane.path + "/" };
+      const dest = { target: pane.target, path: /[\\/]$/.test(pane.path) ? pane.path : pane.path + sepOf(pane.path) };
       startTransferRaw(sources, dest, `local → ${pane.target}: ${names.join(", ")}`,
         () => loadPane(pane, pane.path), null);
       status(`uploading ${names.length} item(s)…`);

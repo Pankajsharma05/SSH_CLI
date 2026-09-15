@@ -43,8 +43,16 @@ impl Target {
     }
 
     /// Multiplexing + keepalive options shared by ssh and scp.
-    /// One TCP connection + one authentication per host; every
-    /// subsequent command attaches to the live master socket.
+    ///
+    /// On macOS and Linux these set up the shared ControlMaster socket:
+    /// one TCP connection and one authentication per host, with every
+    /// subsequent command attaching to the live master.
+    ///
+    /// Windows OpenSSH has no multiplexing, so there the same call
+    /// returns an explicit opt-out instead (see `plat::mux_opts` for
+    /// why silence is not good enough) and connection reuse is handled
+    /// by `mux.rs` at a different layer.
+    #[cfg(not(windows))]
     pub fn control_opts(&self) -> Result<Vec<String>> {
         let sockdir = config::socket_dir()?;
         Ok(vec![
@@ -59,6 +67,11 @@ impl Target {
             "-o".into(),
             "ServerAliveCountMax=4".into(),
         ])
+    }
+
+    #[cfg(windows)]
+    pub fn control_opts(&self) -> Result<Vec<String>> {
+        Ok(crate::plat::mux_opts())
     }
 
     /// Options specific to this target (port flag differs: ssh -p, scp -P).

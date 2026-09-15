@@ -2,7 +2,7 @@ use crate::ops;
 use crate::target::Target;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -20,7 +20,7 @@ struct EditStatus {
 }
 
 fn scp_run(args: &[String]) -> bool {
-    Command::new("scp")
+    crate::plat::cmd(&crate::plat::scp_exe())
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -64,7 +64,7 @@ pub fn open(
     }
 
     // Open with the default app for this file type.
-    let _ = Command::new(crate::ops::opener()).arg(&local).spawn();
+    let _ = crate::ops::open_path(&local.to_string_lossy());
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();

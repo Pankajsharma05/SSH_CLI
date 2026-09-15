@@ -4,7 +4,9 @@
 // ============================================================
 
 const IS_MAC = /Mac/i.test(navigator.platform || "");
+const IS_WIN = /Win/i.test(navigator.platform || "");
 if (!IS_MAC) document.documentElement.classList.add("not-mac");
+if (IS_WIN) document.documentElement.classList.add("is-win");
 
 const inv = (cmd, args) => window.__TAURI__.core.invoke(cmd, args || {});
 const listen = window.__TAURI__.event.listen;
@@ -34,13 +36,37 @@ const IC = {
 };
 
 // ---------------------------------------------------------------- utils
-const joinPath = (dir, name) => (dir.endsWith("/") ? dir + name : dir + "/" + name);
-const parentPath = (p) => {
-  const q = p.replace(/\/+$/, "");
-  const i = q.lastIndexOf("/");
-  return i <= 0 ? "/" : q.slice(0, i);
+// Paths come from two worlds at once: the remote pane is always POSIX
+// (the servers are Linux), while the local pane is POSIX on macOS and
+// Linux but `C:\Users\...` on Windows. Rather than thread a platform
+// flag through every call site, these helpers infer the separator from
+// the path itself — a drive letter or any backslash means Windows.
+const winPath = (p) => /^[A-Za-z]:/.test(p) || p.includes("\\");
+const sepOf = (p) => (winPath(p) ? "\\" : "/");
+/// `C:\` and `/` are roots: they already end in their separator.
+const isRoot = (p) => p === "/" || /^[A-Za-z]:[\\/]?$/.test(p);
+
+const joinPath = (dir, name) => {
+  const s = sepOf(dir);
+  return /[\\/]$/.test(dir) ? dir + name : dir + s + name;
 };
-const baseName = (p) => p.replace(/\/+$/, "").split("/").pop() || "/";
+const parentPath = (p) => {
+  if (isRoot(p)) return p;
+  const s = sepOf(p);
+  const q = p.replace(/[\\/]+$/, "");
+  const i = Math.max(q.lastIndexOf("/"), q.lastIndexOf("\\"));
+  if (i < 0) return q;
+  if (winPath(q)) {
+    // Stop at the drive root rather than producing a bare "C:".
+    const head = q.slice(0, i);
+    return /^[A-Za-z]:$/.test(head) ? head + s : head;
+  }
+  return i === 0 ? "/" : q.slice(0, i);
+};
+const baseName = (p) => {
+  if (isRoot(p)) return p;
+  return p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "/";
+};
 const fmtSize = (n) => {
   if (n < 1024) return n + " B";
   const u = ["KB", "MB", "GB", "TB"];
@@ -60,9 +86,10 @@ const debounce = (fn, ms) => {
 };
 /// Shorten a long path for a tab/label: /very/deep/dir -> …/deep/dir
 const shortPath = (p, keep = 2) => {
-  const parts = p.split("/").filter(Boolean);
+  const s = sepOf(p);
+  const parts = p.split(/[\\/]/).filter(Boolean);
   if (parts.length <= keep) return p;
-  return "…/" + parts.slice(-keep).join("/");
+  return "…" + s + parts.slice(-keep).join(s);
 };
 
 // ---------------------------------------------------------------- shared state

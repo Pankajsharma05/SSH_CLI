@@ -4,6 +4,42 @@ All notable changes to SSH_CLI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added — Windows support
+- **Windows build** (`build_windows.ps1`, plus a `windows-latest` job in CI and
+  the release workflow, producing `ssh_cli.exe` and an NSIS installer).
+- `plat.rs` — one home for platform differences: which `ssh.exe` to run,
+  spawning children without flashing console windows, default-app openers,
+  the local shell, and free-space queries.
+- `mux.rs` — connection reuse on Windows, where `ControlMaster` does not exist.
+  One persistent `ssh.exe` per host runs a shell on the far end and commands
+  are framed into its stdin, so the session still costs one handshake and one
+  authentication instead of one per directory listing.
+- Local terminal tabs run PowerShell 7 → Windows PowerShell → `cmd.exe`
+  through ConPTY, rather than `portable-pty`'s `cmd.exe` default.
+- The local pane understands `C:\...` paths: breadcrumbs start at the drive,
+  the places menu lists every mounted drive, and the free-space footer reads
+  `GetDiskFreeSpaceExW`.
+- [`docs/WINDOWS.md`](docs/WINDOWS.md) — why the file panes need an SSH key
+  there, how to set one up, and what else differs.
+
+### Fixed
+- Windows OpenSSH aborts with `getsockname failed: Not a socket` when a user's
+  `~/.ssh/config` enables `ControlMaster` globally. Omitting the app's own
+  multiplex flags is not enough, so the Windows build now passes an explicit
+  `-o ControlMaster=no -o ControlPath=none` to override the config file.
+- `%SystemRoot%\System32\OpenSSH\ssh.exe` is preferred over whatever `ssh`
+  is first on `PATH`, which is often Git for Windows' MSYS2 build — that one
+  cannot reach the Windows `ssh-agent` named pipe, so agent-held keys silently
+  went unused.
+
+### Known limitations on Windows
+- The file panes require key-based authentication; passwords and 2FA work in
+  terminal tabs only.
+- The `rsync` transfer engine is unavailable and falls back to `scp`.
+- Local `chmod` is not offered (no POSIX mode bits on NTFS).
+
 ## [1.0.0] — 2026-09-15
 
 First public release. It consolidates three internal iterations (v1–v3) into

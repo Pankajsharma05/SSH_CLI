@@ -3,7 +3,10 @@
 mod config;
 mod edit;
 mod fwd;
+#[cfg(windows)]
+mod mux;
 mod ops;
+mod plat;
 mod state;
 mod target;
 mod term;
@@ -12,7 +15,8 @@ use config::Session;
 use ops::{Entry, Side};
 use serde::{Deserialize, Serialize};
 use state::AppState;
-use std::process::{Command, Stdio};
+#[cfg(not(windows))]
+use std::process::Stdio;
 use target::Target;
 
 #[derive(Serialize)]
@@ -36,13 +40,15 @@ fn resolve(name: &str) -> Result<Target, String> {
     Ok(Target::resolve(&cfg, name))
 }
 
+/// Is a reusable, already-authenticated connection to this host up?
+#[cfg(not(windows))]
 fn master_alive(t: &Target) -> bool {
     let Ok(mut args) = t.control_opts() else { return false };
     args.push("-O".into());
     args.push("check".into());
     args.extend(t.host_opts("-p"));
     args.push(t.destination.clone());
-    Command::new("ssh")
+    plat::cmd(&plat::ssh_exe())
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -50,6 +56,13 @@ fn master_alive(t: &Target) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Windows has no control socket to interrogate, so "alive" means the
+/// persistent shell in `mux.rs` answers.
+#[cfg(windows)]
+fn master_alive(t: &Target) -> bool {
+    mux::alive(t)
 }
 
 // ---------- sessions ----------
@@ -60,12 +73,20 @@ async fn sessions_list() -> Result<Vec<SessionInfo>, String> {
     let mut out = Vec::new();
     for (name, s) in &cfg.sessions {
         let t = Target::resolve(&cfg, name);
+        // On Unix this is a cheap socket poke. On Windows "is it live"
+        // can only be answered by *using* the connection, which would
+        // mean dialling every saved host every time the list is drawn —
+        // so report only connections already established.
+        #[cfg(windows)]
+        let live = mux::established(&t);
+        #[cfg(not(windows))]
+        let live = master_alive(&t);
         out.push(SessionInfo {
             name: name.clone(),
             destination: s.destination(),
             port: s.port,
             jump: s.jump.clone(),
-            live: master_alive(&t),
+            live,
         });
     }
     Ok(out)
@@ -112,17 +133,24 @@ async fn session_remove(name: String) -> Result<(), String> {
 #[tauri::command]
 async fn master_close(target: String) -> Result<(), String> {
     let t = resolve(&target)?;
-    let mut args = t.control_opts().map_err(|e| e.to_string())?;
-    args.push("-O".into());
-    args.push("exit".into());
-    args.extend(t.host_opts("-p"));
-    args.push(t.destination.clone());
-    let _ = Command::new("ssh")
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    #[cfg(windows)]
+    {
+        mux::close(&t);
+    }
+    #[cfg(not(windows))]
+    {
+        let mut args = t.control_opts().map_err(|e| e.to_string())?;
+        args.push("-O".into());
+        args.push("exit".into());
+        args.extend(t.host_opts("-p"));
+        args.push(t.destination.clone());
+        let _ = plat::cmd(&plat::ssh_exe())
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
     Ok(())
 }
 
@@ -455,11 +483,7 @@ async fn plots_enable(target: Option<String>) -> Result<serde_json::Value, Strin
 
 #[tauri::command]
 async fn local_open(path: String) -> Result<(), String> {
-    std::process::Command::new(ops::opener())
-        .arg(&path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    ops::open_path(&path)
 }
 
 // ---------- remote editing ----------
@@ -556,7 +580,12 @@ async fn forget_host_key(target: String) -> Result<String, String> {
         Some(p) if p != 22 => format!("[{host}]:{p}"),
         _ => host,
     };
-    let out = Command::new("ssh-keygen")
+    // A stale key also means the multiplexed connection is bound to a
+    // host that no longer answers as itself — drop it so the next
+    // operation redials.
+    #[cfg(windows)]
+    mux::close(&t);
+    let out = plat::cmd(&plat::ssh_keygen_exe())
         .args(["-R", &pattern])
         .output()
         .map_err(|e| format!("running ssh-keygen: {e}"))?;

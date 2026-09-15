@@ -1,4 +1,5 @@
 use crate::ops;
+use crate::plat;
 use crate::state::AppState;
 use crate::target::Target;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -115,7 +116,7 @@ pub fn open_ssh(
     cols: u16,
     prelude: Option<&str>,
 ) -> Result<u64, String> {
-    let mut cmd = CommandBuilder::new("ssh");
+    let mut cmd = CommandBuilder::new(plat::ssh_exe());
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     for a in t.control_opts().map_err(|e| e.to_string())? {
@@ -171,7 +172,19 @@ pub fn open_local(
     plots: bool,
 ) -> Result<u64, String> {
     // A default-prog builder runs the passwd/$SHELL login shell with a
-    // leading-dash argv0, exactly like a terminal emulator would.
+    // leading-dash argv0, exactly like a terminal emulator would. On
+    // Windows that would be cmd.exe; PowerShell is the better default,
+    // so pick explicitly there.
+    #[cfg(windows)]
+    let mut cmd = {
+        let shell = plat::local_shell();
+        let mut c = CommandBuilder::new(&shell[0]);
+        for a in &shell[1..] {
+            c.arg(a);
+        }
+        c
+    };
+    #[cfg(not(windows))]
     let mut cmd = CommandBuilder::new_default_prog();
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -182,8 +195,9 @@ pub fn open_local(
         if let Some(home) = dirs::home_dir() {
             let base = home.join(".ssh_cli");
             let base = base.to_string_lossy().into_owned();
+            // PYTHONPATH is ';'-separated on Windows, ':' elsewhere.
             let pp = match std::env::var("PYTHONPATH") {
-                Ok(v) if !v.is_empty() => format!("{base}:{v}"),
+                Ok(v) if !v.is_empty() => format!("{base}{}{v}", plat::path_sep()),
                 _ => base,
             };
             cmd.env("PYTHONPATH", pp);

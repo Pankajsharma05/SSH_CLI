@@ -142,14 +142,43 @@ animations reuse one tab instead of flooding you.
 
 ## Portability
 
-Linux and macOS are first-class. **Windows is not supported**: Win32 OpenSSH
-has never implemented `ControlMaster`, so every listing and transfer would
-re-authenticate, `ssh -O check` would fail, and the whole login-once model
-collapses. Smaller issues (a `df -Pk` call, `xdg-open`, `/`-only path handling
-in the frontend) are easy; the transport is not.
+Linux and macOS are first-class. Windows is supported with one documented
+difference, described below and in [`WINDOWS.md`](WINDOWS.md).
 
-The realistic Windows path is to replace the OpenSSH-subprocess transport with
-an in-process SSH library such as [`russh`](https://github.com/Eugeny/russh),
-holding the authenticated session inside the app. That would also give real
-byte-level transfer progress instead of scraping scp's meter. Until then,
-WSL2 runs the Linux build unchanged.
+Platform differences are confined to two modules. `plat.rs` holds the small
+ones: which `ssh` binary to run, spawning children without flashing a console
+window, the default-app opener, the local login shell, free-space queries, and
+drive enumeration. `mux.rs` holds the large one.
+
+The large one is that Win32 OpenSSH has never implemented `ControlMaster` —
+the control socket is a Unix domain socket and there is no equivalent. Without
+it every listing and transfer re-authenticates and `ssh -O check` always fails,
+so the login-once model collapses. Merely omitting the flags is not enough
+either: `ssh.exe` still reads `~/.ssh/config`, and a global `ControlMaster auto`
+stanza makes it try anyway and abort with `getsockname failed: Not a socket`.
+The Windows build therefore passes an explicit `-o ControlMaster=no -o
+ControlPath=none`.
+
+In its place, `mux.rs` keeps one long-lived `ssh.exe` per host running `/bin/sh`
+on the far end, with stdin and stdout on pipes. Each command is written into
+that shell framed by a marker line carrying a request id and the exit status,
+so the session still costs one handshake and one authentication, and a listing
+costs a round trip rather than a full login. `Target::control_opts()` and
+`ops::ssh_output()` are the two seams: the rest of the code does not know which
+transport it is on.
+
+The cost is that the shell's stdin is a pipe, not a terminal, so it runs under
+`BatchMode=yes` and cannot answer a password or 2FA prompt — the Windows file
+panes need key-based authentication. Terminal tabs are unaffected; they get a
+real ConPTY through `portable-pty` and prompt interactively as before. Bulk
+transfers also still spawn their own `scp.exe` and authenticate again, since
+pushing file data through a serialized text pipe would be worse than paying
+for a second handshake.
+
+The endgame on every platform is to replace the OpenSSH-subprocess transport
+with an in-process SSH library such as [`russh`](https://github.com/Eugeny/russh),
+holding the authenticated session inside the app and opening real SFTP
+channels. That removes `mux.rs` entirely, gives Windows interactive auth
+(because the app would own the prompt), and gives real byte-level transfer
+progress instead of scraping scp's meter. Until then, WSL2 also runs the Linux
+build unchanged.

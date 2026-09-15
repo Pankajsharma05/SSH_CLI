@@ -6,7 +6,7 @@
 people who live on clusters.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](#install)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#install)
 [![Release](https://img.shields.io/badge/release-v1.0.0-brightgreen)](../../releases)
 
 Two file panes (local↔server, server↔server), terminal tabs that behave like a
@@ -134,9 +134,25 @@ double-click.
 
 ### Windows
 
-Not supported. Windows' OpenSSH has no `ControlMaster` multiplexing, which is
-the foundation the whole app is built on. Running the Linux build inside WSL2
-works today; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#portability).
+```powershell
+git clone https://github.com/Pankajsharma05/SSH_CLI
+cd SSH_CLI
+.\build_windows.ps1 -Install     # build + Start-menu entry
+```
+
+Needs Rust with the MSVC toolchain, the Visual Studio "Desktop development
+with C++" workload, and the OpenSSH client (`Add-WindowsCapability -Online
+-Name OpenSSH.Client~~~~0.0.1.0`). Tagged releases also publish a prebuilt
+`.exe` and an NSIS installer.
+
+**Read [`docs/WINDOWS.md`](docs/WINDOWS.md) first.** One thing works
+differently: Windows' OpenSSH has no `ControlMaster` multiplexing, which is
+the mechanism the Unix builds use to turn one interactive login into
+authentication for the whole session. The Windows build keeps a persistent
+`ssh.exe` shell per host instead, which restores the speed but cannot answer a
+password prompt — so **the file panes need an SSH key in the Windows ssh-agent**.
+Terminal tabs still take passwords and 2FA normally. Running the Linux build
+inside WSL2 remains an alternative if your cluster forbids key auth.
 
 ---
 
@@ -170,6 +186,7 @@ With keys or an agent, everything works immediately.
 |---|---|---|
 | **macOS** | An **ad-hoc** signature (`codesign -s -`), which is *not* an Apple Developer ID identity and is *not* notarized | Gatekeeper: *"SSH_CLI cannot be opened because the developer cannot be verified."* Right-click the app → **Open** → **Open**, once. Or `xattr -dr com.apple.quarantine /Applications/SSH_CLI.app` |
 | **Linux** | Unsigned binary; the `.deb` is not GPG-signed | Nothing blocks you; `apt` may note the package is unsigned |
+| **Windows** | Unsigned `.exe` and installer — no Authenticode certificate | SmartScreen: *"Windows protected your PC."* **More info** → **Run anyway**, once |
 | **Windows** | — | Not supported |
 
 Proper signing needs paid certificates: an Apple Developer Program membership
@@ -207,6 +224,9 @@ src-tauri/src/
   term.rs     PTY sessions: open_ssh / open_local
   ops.rs      listings, transfers, cluster places, host facts, file IO
   target.rs   session -> ssh flags (ControlMaster, -J, -i, -p)
+  plat.rs     platform differences: ssh binary, openers, shells, disks
+  mux.rs      Windows only — persistent ssh shell, standing in for
+              ControlMaster (one auth per host, framed commands)
   config.rs   sessions.toml, UI state, ~/.ssh/config import
   edit.rs     external-editor watch/upload loop
   fwd.rs      port forwards
@@ -216,7 +236,7 @@ ui/
   panes.js    file panes, selection, transfers, connect-watching
   drawer.js   terminals, editor tabs, image/plot viewers
   app.js      sessions, jobs, command palette, keymap, boot
-docs/         architecture, shortcuts, signing
+docs/         architecture, shortcuts, signing, Windows notes
 demo/         scripts to try the plot features against
 ```
 
@@ -227,9 +247,10 @@ More detail in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Contributing
 
 Issues and pull requests are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-Good first areas: BSD/macOS *servers* (remote listings assume GNU `find`), a
-Windows port on an in-process SSH library, directory synchronize/compare, and
-a proper `sbatch` submitter.
+Good first areas: BSD/macOS *servers* (remote listings assume GNU `find`),
+moving the transport to an in-process SSH library (russh) so Windows gets
+interactive auth and transfers get pipelined, directory synchronize/compare,
+and a proper `sbatch` submitter.
 
 ---
 

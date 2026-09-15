@@ -1,6 +1,7 @@
 use crate::target::Target;
 use serde::Serialize;
-use std::process::{Child, Command, Stdio};
+use crate::plat;
+use std::process::{Child, Stdio};
 
 pub struct Forward {
     pub child: Child,
@@ -37,7 +38,7 @@ pub fn start(t: &Target, kind: &str, spec: &str) -> Result<Forward, String> {
     args.push(spec.into());
     args.push(t.destination.clone());
 
-    let child = Command::new("ssh")
+    let child = plat::cmd(&plat::ssh_exe())
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

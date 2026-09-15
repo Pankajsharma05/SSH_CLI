@@ -1,7 +1,8 @@
 use crate::config;
+use crate::plat;
 use crate::target::Target;
 use serde::Serialize;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter};
 
@@ -36,6 +37,7 @@ pub fn sh_quote(s: &str) -> String {
 /// Non-interactive ssh invocation attached to the shared control socket.
 /// stdin is /dev/null so a missing/locked key fails fast instead of
 /// hanging on a password prompt (the terminal is where you authenticate).
+#[cfg(not(windows))]
 fn ssh_output(t: &Target, remote_cmd: &str) -> Result<std::process::Output, String> {
     let mut args = t.control_opts().map_err(|e| e.to_string())?;
     args.push("-o".into());
@@ -46,11 +48,19 @@ fn ssh_output(t: &Target, remote_cmd: &str) -> Result<std::process::Output, Stri
     args.push(t.destination.clone());
     args.push("--".into());
     args.push(remote_cmd.to_string());
-    Command::new("ssh")
+    plat::cmd(&plat::ssh_exe())
         .args(&args)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("running ssh: {e}"))
+}
+
+/// Windows has no ControlMaster, so the same call rides the persistent
+/// shell in `mux.rs` instead of paying for a fresh handshake and a
+/// fresh authentication on every directory listing.
+#[cfg(windows)]
+fn ssh_output(t: &Target, remote_cmd: &str) -> Result<std::process::Output, String> {
+    crate::mux::output(t, remote_cmd)
 }
 
 fn ssh_check(t: &Target, remote_cmd: &str) -> Result<(), String> {
@@ -73,11 +83,23 @@ pub fn remote_home(t: &Target) -> Result<String, String> {
 fn auth_hint(stderr: &[u8]) -> String {
     let msg = String::from_utf8_lossy(stderr).trim().to_string();
     if msg.contains("Permission denied") || msg.contains("Interactive authentication") {
-        format!(
-            "{msg}\n\nHint: open a Terminal tab to this host first and log in there \
-             (password/2FA works in the terminal). File operations then reuse that \
-             connection automatically."
-        )
+        if cfg!(windows) {
+            // The Unix advice does not transfer: without multiplexing a
+            // password typed in a terminal tab cannot be reused.
+            format!(
+                "{msg}\n\nHint: on Windows the file panes need key-based \
+                 authentication, because Windows OpenSSH cannot share an \
+                 authenticated connection between processes. Add a key to the \
+                 ssh-agent service — see Help ▸ Windows notes. Terminal tabs \
+                 still accept passwords and 2FA."
+            )
+        } else {
+            format!(
+                "{msg}\n\nHint: open a Terminal tab to this host first and log in there \
+                 (password/2FA works in the terminal). File operations then reuse that \
+                 connection automatically."
+            )
+        }
     } else {
         msg
     }
@@ -240,13 +262,23 @@ pub fn transfer(
     }
 
     // rsync engine: local<->remote only, resumable + delta transfer.
-    let mut program = "scp";
+    // Not on Windows: there is no rsync in the OpenSSH package, and a
+    // Git-Bash or MSYS2 rsync mangles drive-letter paths, so the queue
+    // quietly falls back to scp there.
+    #[cfg(windows)]
+    let program = {
+        let _ = engine;
+        plat::scp_exe()
+    };
+    #[cfg(not(windows))]
+    let mut program = plat::scp_exe();
+    #[cfg(not(windows))]
     if engine == "rsync"
         && !(a_target.is_some() && b_target.is_some())
         && sources.iter().chain(std::iter::once(&dest)).all(|s| !side_path(s).contains(' '))
     {
         if let Some(t) = &any_target {
-            let mut ssh_cmd: Vec<String> = vec!["ssh".into()];
+            let mut ssh_cmd: Vec<String> = vec![plat::ssh_exe()];
             ssh_cmd.extend(t.control_opts().map_err(|e| e.to_string())?);
             ssh_cmd.push("-o".into());
             ssh_cmd.push("ConnectTimeout=10".into());
@@ -260,7 +292,7 @@ pub fn transfer(
                 "-e".into(),
                 ssh_cmd.join(" "),
             ];
-            program = "rsync";
+            program = "rsync".to_string();
         }
     }
 
@@ -269,9 +301,8 @@ pub fn transfer(
     }
     args.push(side_spec(&dest));
 
-    let program = program.to_string();
     std::thread::spawn(move || {
-        let child = Command::new(&program)
+        let child = plat::cmd(&program)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -460,8 +491,29 @@ pub fn disk_usage(t: Option<&Target>, path: &str) -> Result<String, String> {
             }
             String::from_utf8_lossy(&out.stdout).into_owned()
         }
+        // Windows has no df; ask the filesystem API directly and
+        // return early with the formatted answer.
+        #[cfg(windows)]
         None => {
-            let out = Command::new("df")
+            let Some((free, total)) = plat::local_free_total(path) else {
+                return Ok(String::new());
+            };
+            let gib = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+            let used_pct = if total > 0 {
+                ((total - free) as f64 / total as f64 * 100.0).round() as u64
+            } else {
+                0
+            };
+            return Ok(format!(
+                "{:.1} GB free of {:.1} GB ({}% used)",
+                gib(free),
+                gib(total),
+                used_pct
+            ));
+        }
+        #[cfg(not(windows))]
+        None => {
+            let out = plat::cmd("df")
                 .args(["-Pk", path])
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -542,6 +594,12 @@ pub fn local_places() -> Vec<Place> {
     push("documents", dirs::document_dir());
     push("downloads", dirs::download_dir());
     push("tmp", Some(std::env::temp_dir()));
+    drop(push);
+    // Every mounted drive, so the pane can leave the user profile.
+    #[cfg(windows)]
+    for d in plat::drives() {
+        places.push(Place { label: d.trim_end_matches('\\').to_lowercase(), path: d });
+    }
     places
 }
 
@@ -632,7 +690,7 @@ pub fn compress_download(
         };
         args.push(format!("{}:{}", t.destination, remote_tmp));
         args.push(local_tmp.to_string_lossy().into_owned());
-        let ok = Command::new("scp")
+        let ok = plat::cmd(&plat::scp_exe())
             .args(&args)
             .stdin(Stdio::null())
             .status()
@@ -644,7 +702,9 @@ pub fn compress_download(
             return fail(&app, "archive download failed".into());
         }
         emit("unpacking…".into());
-        let ok = Command::new("tar")
+        // Windows 10 1803+ ships bsdtar as tar.exe, so one invocation
+        // covers every platform.
+        let ok = plat::cmd(plat::tar_exe())
             .args(["-xzf", &local_tmp.to_string_lossy(), "-C", &local_dir])
             .status()
             .map(|s| s.success())
@@ -673,6 +733,12 @@ pub fn remote_read_text(t: &Target, path: &str) -> Result<String, String> {
 
 /// Write the built-in editor's buffer back to a remote file, atomically
 /// enough for job scripts: write to a temp file, then mv into place.
+#[cfg(windows)]
+pub fn remote_write_text(t: &Target, path: &str, data: &str) -> Result<(), String> {
+    crate::mux::write_file(t, path, data)
+}
+
+#[cfg(not(windows))]
 pub fn remote_write_text(t: &Target, path: &str, data: &str) -> Result<(), String> {
     use std::io::Write;
     let tmp = format!("{}.ssh_cli_tmp", path);
@@ -689,7 +755,7 @@ pub fn remote_write_text(t: &Target, path: &str, data: &str) -> Result<(), Strin
         tmp = sh_quote(&tmp),
         orig = sh_quote(path)
     ));
-    let mut child = Command::new("ssh")
+    let mut child = plat::cmd(&plat::ssh_exe())
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -731,9 +797,9 @@ fn text_guard(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8 text".into())
 }
 
-/// Platform default-app opener: `open` on macOS, `xdg-open` on Linux.
-pub fn opener() -> &'static str {
-    if cfg!(target_os = "macos") { "open" } else { "xdg-open" }
+/// Hand a path to the desktop's default application.
+pub fn open_path(path: &str) -> Result<(), String> {
+    plat::open_path(path)
 }
 
 // ---------- image viewer support ----------
@@ -741,6 +807,19 @@ pub fn opener() -> &'static str {
 const IMG_MAX: usize = 20_000_000;
 
 /// Raw bytes of a remote file (size-capped) for the image viewer.
+///
+/// The Windows transport is a text pipe, so the bytes come back base64
+/// encoded and are decoded here.
+#[cfg(windows)]
+pub fn remote_read_bytes(t: &Target, path: &str) -> Result<Vec<u8>, String> {
+    let bytes = crate::mux::read_file(t, path, IMG_MAX)?;
+    if bytes.len() > IMG_MAX {
+        return Err("file is too large for the image viewer (20 MB limit)".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(not(windows))]
 pub fn remote_read_bytes(t: &Target, path: &str) -> Result<Vec<u8>, String> {
     let cmd = format!("head -c {} -- {}", IMG_MAX + 1, sh_quote(path));
     let out = ssh_output(t, &cmd)?;
@@ -791,4 +870,30 @@ pub fn base64_encode(data: &[u8]) -> String {
         out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
     }
     out
+}
+
+/// Inverse of `base64_encode` — the Windows transport carries binary
+/// file contents as base64 text, so it needs both halves.
+pub fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for c in text.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' | b' ' | b'\t' => continue,
+            _ => return Err("malformed base64 from the server".into()),
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Ok(out)
 }

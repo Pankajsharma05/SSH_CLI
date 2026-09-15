@@ -58,9 +58,37 @@ jobs:
           name: macos
           path: out/*
 
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build exe + NSIS installer
+        # NOTE: unsigned. SmartScreen will warn on first run.
+        # See docs/SIGNING.md.
+        run: .\build_windows.ps1 -Installer
+        shell: pwsh
+      - name: Name the artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item dist\ssh_cli.exe out\ssh_cli-windows-x86_64.exe
+          Get-ChildItem dist\*setup.exe | ForEach-Object { Copy-Item $_.FullName out\ }
+          Get-FileHash out\* -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content out\SHA256SUMS-windows.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+
   publish:
     name: Publish the release
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -77,6 +105,10 @@ jobs:
             **These binaries are not code-signed or notarized.**
             On macOS: right-click the app → Open → Open (once), or
             `xattr -dr com.apple.quarantine /Applications/SSH_CLI.app`.
+            On Windows: SmartScreen shows "Windows protected your PC" →
+            More info → Run anyway. Windows users should also read
+            [docs/WINDOWS.md](docs/WINDOWS.md) — the file panes need an
+            SSH key, because Windows OpenSSH cannot share a connection.
             Details and the reasoning: [docs/SIGNING.md](docs/SIGNING.md).
             If you would rather not trust an unsigned download, building from
             source takes one command.
