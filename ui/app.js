@@ -729,4 +729,5 @@ async function boot() {
   toast(`ready — ${MOD}K for commands, ${MOD}3 for a full terminal`);
 }
 
-boot();
+// Any failure in here used to leave a blank window.
+boot().catch((e) => fatal(e, "startup"));

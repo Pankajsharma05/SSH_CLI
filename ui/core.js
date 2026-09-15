@@ -8,6 +8,44 @@ const IS_WIN = /Win/i.test(navigator.platform || "");
 if (!IS_MAC) document.documentElement.classList.add("not-mac");
 if (IS_WIN) document.documentElement.classList.add("is-win");
 
+// ---------------------------------------------------------------- failure visibility
+// A thrown error during start-up used to leave an empty window with no
+// clue what happened — the worst possible thing to debug remotely. Show
+// it on screen instead, and keep a copy the user can copy out.
+function fatal(err, where) {
+  const text = (err && (err.stack || err.message)) || String(err);
+  let box = document.getElementById("fatal");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "fatal";
+    document.body && document.body.appendChild(box);
+  }
+  if (!box.parentNode) return;
+  box.innerHTML = "";
+  const h = document.createElement("h2");
+  h.textContent = "SSH_CLI hit an error during " + (where || "startup");
+  const pre = document.createElement("pre");
+  pre.textContent = text;
+  const hint = document.createElement("p");
+  hint.textContent =
+    "Please send this text along with what you were doing. Select it and press " +
+    (/Mac/i.test(navigator.platform || "") ? "Cmd" : "Ctrl") + "+C.";
+  box.append(h, pre, hint);
+  box.style.display = "block";
+}
+
+window.addEventListener("error", (e) => fatal(e.error || e.message, "startup"));
+window.addEventListener("unhandledrejection", (e) => fatal(e.reason, "a background task"));
+
+if (!window.__TAURI__ || !window.__TAURI__.core) {
+  // The page loaded but the native bridge did not, so nothing can work.
+  document.addEventListener("DOMContentLoaded", () =>
+    fatal(new Error(
+      "The Tauri bridge (window.__TAURI__) is missing, so the interface cannot " +
+      "talk to the backend. This usually means the WebView2 runtime is too old " +
+      "or the app was started from a broken copy."), "startup"));
+}
+
 const inv = (cmd, args) => window.__TAURI__.core.invoke(cmd, args || {});
 const listen = window.__TAURI__.event.listen;
 

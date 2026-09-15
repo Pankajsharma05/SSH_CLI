@@ -747,3 +747,19 @@ table.jobs-tbl td {
   color: var(--accent); margin-bottom: 8px;
 }
 .auth-modal input { width: 100%; font-size: .95rem; padding: 8px 10px; }
+
+/* ---------- fatal error overlay ---------- */
+#fatal {
+  display: none; position: fixed; inset: 0; z-index: 9999;
+  background: var(--bg, #0c0f16); color: var(--fg, #e2e8f4);
+  font-family: var(--font-ui, sans-serif);
+  padding: 32px; overflow: auto; user-select: text;
+}
+#fatal h2 { font-size: 1.05rem; margin-bottom: 12px; color: var(--danger, #ef6e7e); }
+#fatal pre {
+  font-family: var(--font-mono, monospace); font-size: .8rem; line-height: 1.55;
+  white-space: pre-wrap; background: var(--bg2, #121623);
+  border: 1px solid var(--line, #252d40); border-radius: 8px; padding: 12px;
+  max-height: 60vh; overflow: auto;
+}
+#fatal p { margin-top: 12px; font-size: .82rem; color: var(--dim, #97a2b8); }

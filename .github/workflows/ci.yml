@@ -57,6 +57,29 @@ jobs:
           path: dist/ssh_cli.exe
           if-no-files-found: error
 
+      # A debug build keeps the console subsystem (the release attribute
+      # is cfg'd on not(debug_assertions)), so running this one from
+      # PowerShell prints Rust panics and backtraces that the windowed
+      # build swallows. Diagnostics only — it is slower and unoptimised.
+      - name: Build a console/debug exe for diagnostics
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          Push-Location src-tauri
+          cargo build
+          Pop-Location
+          Copy-Item src-tauri\target\debug\ssh_cli.exe dist\ssh_cli-debug.exe
+
+      - name: Upload the diagnostic exe
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh_cli-windows-debug
+          path: dist/ssh_cli-debug.exe
+          if-no-files-found: error
+
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --release --all-targets -- -D warnings
