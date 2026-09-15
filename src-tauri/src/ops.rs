@@ -438,10 +438,9 @@ pub fn transfer(
 
         let mut ok = true;
         for src in &sources {
-            let raw = side_path(src);
-            let name = raw.trim_end_matches('/').rsplit('/').next().unwrap_or("item");
-            let name = if name.is_empty() { "item" } else { name };
-            prog.label = name.to_string();
+            let name = item_name(src);
+            prog.label = name.clone();
+            let name = name.as_str();
             emit(format!("{name}…"));
 
             let result = match (src, &dest) {
@@ -479,6 +478,32 @@ pub fn transfer(
         let _ = app.emit("xfer-done", XferDone { id, ok });
     });
     Ok(())
+}
+
+/// The last component of a transfer source, used to name it at the
+/// destination.
+///
+/// The two sides do not agree on what a separator is. A local path on
+/// Windows is `C:\\Users\\you\\file.txt` and may use either slash; a
+/// remote path is POSIX, where a backslash is an ordinary character in a
+/// filename and splitting on it would corrupt the name.
+//
+// Compiled on every platform so the regression tests below run on a
+// developer's machine, not only on a Windows CI runner.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn item_name(s: &Side) -> String {
+    let (raw, local) = match s {
+        Side::Local(p) => (p.as_str(), true),
+        Side::Remote(_, p) => (p.as_str(), false),
+    };
+    let sep = |c: char| c == '/' || (local && c == '\\');
+    let trimmed = raw.trim_end_matches(sep);
+    let name = trimmed.rsplit(sep).next().unwrap_or("");
+    if name.is_empty() || name.ends_with(':') {
+        "item".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 #[cfg(windows)]
@@ -1051,3 +1076,43 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::Target;
+
+    fn remote(p: &str) -> Side {
+        Side::Remote(
+            Target {
+                raw: "h".into(),
+                destination: "me@h".into(),
+                port: None,
+                identity: None,
+                jump: None,
+                startup: None,
+            },
+            p.into(),
+        )
+    }
+
+    /// Uploads were creating `/home/me/C:\Users\me\file.txt` on the
+    /// server because a Windows local path has no forward slashes.
+    #[test]
+    fn names_windows_local_paths() {
+        assert_eq!(item_name(&Side::Local("C:\\Users\\me\\run.py".into())), "run.py");
+        assert_eq!(item_name(&Side::Local("C:/Users/me/run.py".into())), "run.py");
+        assert_eq!(item_name(&Side::Local("C:\\Users\\me\\data\\".into())), "data");
+        assert_eq!(item_name(&Side::Local("C:\\".into())), "item");
+    }
+
+    /// A backslash is a legal character in a POSIX filename, so the
+    /// remote side must split on '/' only.
+    #[test]
+    fn names_remote_paths() {
+        assert_eq!(item_name(&remote("/scratch/me/out.png")), "out.png");
+        assert_eq!(item_name(&remote("/scratch/me/runs/")), "runs");
+        assert_eq!(item_name(&remote("/scratch/me/odd\\name.txt")), "odd\\name.txt");
+    }
+}
