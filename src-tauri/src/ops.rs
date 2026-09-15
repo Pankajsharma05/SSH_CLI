@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use crate::config;
 use crate::plat;
 use crate::target::Target;
