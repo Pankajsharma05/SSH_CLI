@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SSH_CLI</title>
+  <link rel="stylesheet" href="vendor/xterm.css" />
+  <link rel="stylesheet" href="vendor/codemirror.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-layout="split">
+  <header id="topbar" data-tauri-drag-region>
+    <div class="brand"><span class="chev">&gt;_</span> SSH_CLI</div>
+
+    <button id="btn-sessions" class="btn" title="Saved hosts, connections & port forwards">Sessions</button>
+    <button id="btn-palette" class="btn ghost" title="Command palette — every action, every host">
+      <span class="mag">⌕</span><span class="cmdk-label">commands</span><kbd id="kbd-palette">⌘K</kbd>
+    </button>
+
+    <div class="seg seg-layout" id="layout-seg" title="Window layout">
+      <button class="btn" data-layout="files" title="Files only (⌘1)">▤</button>
+      <button class="btn" data-layout="split" title="Files + terminal (⌘2)">⬓</button>
+      <button class="btn" data-layout="term"  title="Full terminal panel (⌘3)">▬</button>
+    </div>
+
+    <div class="spacer"></div>
+    <div id="statusbar">ready</div>
+    <div id="counts"></div>
+    <div class="bar-sep"></div>
+
+    <button id="btn-jobs" class="btn" title="Batch queue (SLURM/PBS)">Jobs</button>
+    <button id="btn-rsync" class="btn" title="Use rsync for transfers when possible (resumable, delta-sync)">rsync</button>
+    <button id="btn-plots" class="btn" title="Remote plots: make plt.show() pop up here, even on a cluster with no display">plots</button>
+    <button id="btn-help" class="btn" title="Keyboard shortcuts (?)">?</button>
+    <button id="btn-settings" class="btn" title="Appearance &amp; preferences">⚙</button>
+  </header>
+
+  <main id="main">
+    <section class="pane" id="pane-left"></section>
+    <div id="midbar" title="Drag to resize panes · double-click to even them out">
+      <button id="xfer-right" class="btn big" title="Copy selection left → right (F5)">→</button>
+      <button id="xfer-left"  class="btn big" title="Copy selection right → left (F5)">←</button>
+      <button id="xfer-tar"   class="btn" title="Compress on server, download one archive, unpack locally — much faster for many small files">tar⇣</button>
+      <button id="btn-sync"   class="btn" title="Synchronized browsing: both panes navigate together">⇅</button>
+      <button id="btn-swap"   class="btn" title="Swap the two panes">⇄</button>
+    </div>
+    <section class="pane" id="pane-right"></section>
+    <aside id="jobs" class="hidden">
+      <div class="jobs-head">
+        <strong>Queue</strong>
+        <select id="jobs-host"></select>
+        <button id="jobs-refresh" class="btn tiny">refresh</button>
+        <button id="jobs-close" class="btn tiny">✕</button>
+      </div>
+      <div id="jobs-body" class="jobs-body">no jobs loaded</div>
+    </aside>
+  </main>
+
+  <section id="drawer">
+    <div id="drawer-grip" title="Drag to resize the terminal panel"></div>
+    <div id="term-tabs">
+      <button id="btn-new-term" class="btn tiny accent" title="New terminal (⌘T) — click for host list">+ ▾</button>
+      <span id="term-tab-list"></span>
+      <span class="spacer"></span>
+      <button id="btn-broadcast" class="btn tiny" title="Broadcast typing to all terminals">⇶ all</button>
+      <button id="btn-arm-plots" class="btn tiny" title="Arm plt.show() in THIS terminal (sends the export line to its shell)">◍ plt</button>
+      <span id="term-search" class="hidden">
+        <input id="term-search-input" placeholder="search" />
+        <button id="ts-prev" class="btn tiny">↑</button>
+        <button id="ts-next" class="btn tiny">↓</button>
+        <button id="ts-close" class="btn tiny">✕</button>
+      </span>
+      <button id="btn-maximize" class="btn tiny" title="Full terminal panel (⌘3 · ⌃`)">⤢</button>
+    </div>
+    <div id="term-holder">
+      <div id="term-empty">
+        <div class="te-title">No terminal open</div>
+        <div class="te-sub">Terminals here are real PTYs — vim, htop, tmux and 2FA logins all work.</div>
+        <div class="te-actions" id="te-actions"></div>
+        <div class="te-hint">⌘T new terminal · ⌘K command palette · ⌘1/2/3 layout</div>
+      </div>
+    </div>
+  </section>
+
+  <aside id="queue" class="hidden">
+    <div class="q-title">Activity
+      <span>
+        <button id="q-history" class="btn tiny">history</button>
+        <button id="q-clear" class="btn tiny">clear</button>
+      </span>
+    </div>
+    <div id="edit-items"></div>
+    <div id="q-items"></div>
+  </aside>
+
+  <div id="toasts"></div>
+  <div id="modal-root" class="hidden"></div>
+
+  <div id="palette" class="hidden">
+    <div class="pal-box">
+      <input id="pal-input" placeholder="Type a command, host, or folder…" spellcheck="false" />
+      <div id="pal-list"></div>
+      <div class="pal-foot"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>↵</kbd> run · <kbd>esc</kbd> close</div>
+    </div>
+  </div>
+
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="vendor/addon-search.js"></script>
+  <script src="vendor/addon-web-links.js"></script>
+  <script src="vendor/addon-image.js"></script>
+  <script src="vendor/codemirror.js"></script>
+  <script src="vendor/cm-python.js"></script>
+  <script src="vendor/cm-shell.js"></script>
+  <script src="vendor/cm-clike.js"></script>
+  <script src="vendor/cm-stex.js"></script>
+  <script src="vendor/cm-yaml.js"></script>
+  <script src="vendor/cm-toml.js"></script>
+  <script src="vendor/cm-rust.js"></script>
+  <script src="vendor/cm-julia.js"></script>
+  <script src="vendor/cm-javascript.js"></script>
+  <script src="vendor/cm-markdown.js"></script>
+  <script src="core.js"></script>
+  <script src="panes.js"></script>
+  <script src="drawer.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

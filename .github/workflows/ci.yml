@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: ./build_linux.sh --deps
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Both scripts vendor xterm.js/CodeMirror/fonts, then cargo build.
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: ./build_linux.sh
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: ./build_mac.sh
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: Check the binary is complete
+        if: runner.os == 'Linux'
+        run: |
+          test -x dist/ssh_cli
+          ldd dist/ssh_cli | (! grep 'not found')

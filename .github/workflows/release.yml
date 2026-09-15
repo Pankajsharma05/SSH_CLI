@@ -1,0 +1,82 @@
+name: Release
+
+# Tag a release and this builds the artifacts and attaches them:
+#   git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: ./build_linux.sh --deps
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build binary + .deb
+        run: ./build_linux.sh --deb
+      - name: Name the artifacts
+        run: |
+          mkdir -p out
+          cp dist/ssh_cli out/ssh_cli-linux-x86_64
+          cp dist/*.deb out/
+          (cd out && sha256sum * > SHA256SUMS-linux.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*
+
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build universal .app + .dmg
+        # NOTE: the app is only ad-hoc signed and is NOT notarized.
+        # See docs/SIGNING.md before distributing this widely.
+        run: ./build_mac.sh --universal --dmg
+      - name: Name the artifacts
+        run: |
+          mkdir -p out
+          cp dist/SSH_CLI.dmg out/SSH_CLI-macos-universal.dmg
+          (cd out && shasum -a 256 * > SHA256SUMS-macos.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/*
+
+  publish:
+    name: Publish the release
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          body: |
+            See [CHANGELOG.md](CHANGELOG.md) for what changed.
+
+            **These binaries are not code-signed or notarized.**
+            On macOS: right-click the app → Open → Open (once), or
+            `xattr -dr com.apple.quarantine /Applications/SSH_CLI.app`.
+            Details and the reasoning: [docs/SIGNING.md](docs/SIGNING.md).
+            If you would rather not trust an unsigned download, building from
+            source takes one command.
