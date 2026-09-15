@@ -391,15 +391,40 @@ impl KeyboardInteractivePrompt for UiPrompter {
     }
 }
 
+/// One dial at a time per host.
+///
+/// Pointing a pane at a host fires several requests at once — the home
+/// directory, the places list, the host facts — and without this they
+/// would each find an empty registry and start their own login, so the
+/// user would be asked for the same password two or three times over.
+fn dial_gate(k: &str) -> Arc<Mutex<()>> {
+    static G: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let gates = G.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut m = gates.lock().unwrap_or_else(|e| e.into_inner());
+    m.entry(k.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 /// Hand back the connection for this target, dialling (and prompting) if
 /// there is not one yet.
 fn get(t: &Target) -> Result<Arc<Mutex<Conn>>, String> {
     let k = key(t);
-    if let Some(c) = registry().lock().ok().and_then(|m| m.get(&k).cloned()) {
+    let lookup = || registry().lock().ok().and_then(|m| m.get(&k).cloned());
+    if let Some(c) = lookup() {
         return Ok(c);
     }
-    // Dial outside the registry lock so a slow login does not freeze
-    // operations on other hosts.
+
+    // Dial outside the registry lock, so a slow login does not freeze
+    // operations on other hosts — but behind this host's own gate, so
+    // only one login happens.
+    let gate = dial_gate(&k);
+    let _dialling = gate.lock().map_err(|_| "dial gate poisoned")?;
+
+    // Someone may have finished connecting while we waited for the gate.
+    if let Some(c) = lookup() {
+        return Ok(c);
+    }
     let conn = Arc::new(Mutex::new(connect(t)?));
     let mut map = registry().lock().map_err(|_| "connection registry poisoned")?;
     Ok(map.entry(k).or_insert(conn).clone())

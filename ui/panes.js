@@ -432,15 +432,30 @@ function renderDisconnected(pane, msg) {
   pane.view = [];
   const box = el("div", "pane-msg discon");
   box.appendChild(el("div", "dc-title", "Not connected to " + pane.target));
-  box.appendChild(el("div", "dc-sub",
-    "Open a terminal and log in (password, 2FA and OTP all work there). " +
-    "This pane jumps to your home directory on that cluster the moment the login succeeds."));
   const acts = el("div", "dc-acts");
-  const go = el("button", "btn primary", ">_  Open terminal & log in");
-  go.onclick = () => openTerminal(pane.target);
-  const retry = el("button", "btn", "Retry");
-  retry.onclick = () => goHome(pane);
-  acts.append(go, retry);
+  if (IS_WIN) {
+    // The app holds the connection itself here, so it can ask for the
+    // password or 2FA code directly — a terminal tab is a separate
+    // login and would not help this pane.
+    box.appendChild(el("div", "dc-sub",
+      "Connect and this pane opens your home directory on that cluster. " +
+      "Passwords, key passphrases and verification codes are asked for here, " +
+      "in the app."));
+    const go = el("button", "btn primary", "Connect");
+    go.onclick = () => goHome(pane);
+    const term = el("button", "btn", ">_  Terminal");
+    term.onclick = () => openTerminal(pane.target);
+    acts.append(go, term);
+  } else {
+    box.appendChild(el("div", "dc-sub",
+      "Open a terminal and log in (password, 2FA and OTP all work there). " +
+      "This pane jumps to your home directory on that cluster the moment the login succeeds."));
+    const go = el("button", "btn primary", ">_  Open terminal & log in");
+    go.onclick = () => openTerminal(pane.target);
+    const retry = el("button", "btn", "Retry");
+    retry.onclick = () => goHome(pane);
+    acts.append(go, retry);
+  }
   box.appendChild(acts);
 
   if (/HOST IDENTIFICATION HAS CHANGED|Host key verification failed/i.test(msg)) {
@@ -1157,6 +1172,7 @@ function wireFileDrop() {
 const connectWatchers = new Map();
 
 function watchConnect(target) {
+  if (IS_WIN) return;
   if (!target || connectWatchers.has(target)) return;
   const w = { tries: 0, stopped: false };
   connectWatchers.set(target, w);
