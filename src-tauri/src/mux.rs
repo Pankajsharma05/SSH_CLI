@@ -434,11 +434,6 @@ pub fn established(t: &Target) -> bool {
     alive(t)
 }
 
-/// Open the connection on purpose (prompting if needed). This is what a
-/// pane does when you point it at a host.
-pub fn ensure(t: &Target) -> Result<(), String> {
-    get(t).map(|_| ())
-}
 
 /// Run something with the connection, retrying once on a fresh one if the
 /// link turns out to be stale.
@@ -740,11 +735,12 @@ pub struct Progress<'a> {
 
 impl Progress<'_> {
     fn emit(&self) {
-        let pct = if self.total > 0 {
-            (self.done.saturating_mul(100) / self.total).min(100)
-        } else {
-            0
-        };
+        let pct = self
+            .done
+            .saturating_mul(100)
+            .checked_div(self.total)
+            .unwrap_or(0)
+            .min(100);
         let _ = self.app.emit(
             "xfer-log",
             serde_json::json!({

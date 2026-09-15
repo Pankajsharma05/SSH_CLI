@@ -614,7 +614,6 @@ async fn forget_host_key(target: String) -> Result<String, String> {
 /// prompts from worker threads that have none of their own.
 #[cfg(windows)]
 fn init_transport(app: &mut tauri::App) {
-    use tauri::Manager;
     mux::init(app.handle().clone());
 }
 

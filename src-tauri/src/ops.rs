@@ -2,6 +2,7 @@ use crate::config;
 use crate::plat;
 use crate::target::Target;
 use serde::Serialize;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter};
@@ -75,7 +76,7 @@ fn ssh_check(t: &Target, remote_cmd: &str) -> Result<(), String> {
 pub fn remote_home(t: &Target) -> Result<String, String> {
     #[cfg(windows)]
     {
-        return crate::mux::home(t);
+        crate::mux::home(t)
     }
     #[cfg(not(windows))]
     {
@@ -122,7 +123,7 @@ pub fn remote_list(t: &Target, path: &str) -> Result<Vec<Entry>, String> {
     {
         let mut entries = crate::mux::list_dir(t, path)?;
         sort_entries(&mut entries);
-        return Ok(entries);
+        Ok(entries)
     }
     #[cfg(not(windows))]
     {
@@ -215,23 +216,35 @@ fn sort_entries(entries: &mut [Entry]) {
 
 pub fn remote_mkdir(t: &Target, path: &str) -> Result<(), String> {
     #[cfg(windows)]
-    return crate::mux::mkdir(t, path);
+    {
+        crate::mux::mkdir(t, path)
+    }
     #[cfg(not(windows))]
-    ssh_check(t, &format!("mkdir -p -- {}", sh_quote(path)))
+    {
+        ssh_check(t, &format!("mkdir -p -- {}", sh_quote(path)))
+    }
 }
 
 pub fn remote_delete(t: &Target, path: &str) -> Result<(), String> {
     #[cfg(windows)]
-    return crate::mux::remove(t, path);
+    {
+        crate::mux::remove(t, path)
+    }
     #[cfg(not(windows))]
-    ssh_check(t, &format!("rm -rf -- {}", sh_quote(path)))
+    {
+        ssh_check(t, &format!("rm -rf -- {}", sh_quote(path)))
+    }
 }
 
 pub fn remote_rename(t: &Target, from: &str, to: &str) -> Result<(), String> {
     #[cfg(windows)]
-    return crate::mux::rename(t, from, to);
+    {
+        crate::mux::rename(t, from, to)
+    }
     #[cfg(not(windows))]
-    ssh_check(t, &format!("mv -- {} {}", sh_quote(from), sh_quote(to)))
+    {
+        ssh_check(t, &format!("mv -- {} {}", sh_quote(from), sh_quote(to)))
+    }
 }
 
 /// Same-host copy runs directly on the server — no data leaves it.
@@ -485,6 +498,7 @@ fn side_path(s: &Side) -> &str {
     }
 }
 
+#[cfg(not(windows))]
 fn side_spec(s: &Side) -> String {
     match s {
         Side::Local(p) => p.clone(),
@@ -492,6 +506,7 @@ fn side_spec(s: &Side) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn merge_host_flags(args: &mut Vec<String>, a: &Target, b: &Target) -> Result<(), String> {
     match (a.port, b.port) {
         (Some(x), Some(y)) if x != y => {
@@ -525,6 +540,7 @@ fn merge_host_flags(args: &mut Vec<String>, a: &Target, b: &Target) -> Result<()
 
 /// Read a byte stream, emitting on both \n and \r so scp's
 /// carriage-return progress meter arrives as it updates.
+#[cfg(not(windows))]
 fn pump_lines<R: std::io::Read>(mut r: R, mut emit: impl FnMut(String)) {
     let mut buf = [0u8; 4096];
     let mut acc: Vec<u8> = Vec::new();
@@ -760,7 +776,7 @@ pub fn chmod_remote(t: &Target, path: &str, mode: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         let bits = u32::from_str_radix(mode, 8).map_err(|_| "mode must be octal")?;
-        return crate::mux::chmod(t, path, bits);
+        crate::mux::chmod(t, path, bits)
     }
     #[cfg(not(windows))]
     ssh_check(t, &format!("chmod {} -- {}", mode, sh_quote(path)))
@@ -873,7 +889,7 @@ const EDIT_MAX: usize = 2_000_000;
 pub fn remote_read_text(t: &Target, path: &str) -> Result<String, String> {
     #[cfg(windows)]
     {
-        return text_guard(crate::mux::read_file(t, path, EDIT_MAX)?);
+        text_guard(crate::mux::read_file(t, path, EDIT_MAX)?)
     }
     #[cfg(not(windows))]
     {
@@ -1000,7 +1016,7 @@ pub fn local_read_bytes(path: &str) -> Result<Vec<u8>, String> {
 pub fn remote_stat(t: &Target, path: &str) -> Result<(u64, u64), String> {
     #[cfg(windows)]
     {
-        return crate::mux::stat(t, path);
+        crate::mux::stat(t, path)
     }
     #[cfg(not(windows))]
     {
@@ -1034,30 +1050,3 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// Inverse of `base64_encode` — the Windows transport carries binary
-/// file contents as base64 text, so it needs both halves. Unix reads
-/// bytes straight off the ssh pipe and never calls this.
-#[cfg(windows)]
-pub fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let mut acc: u32 = 0;
-    let mut bits = 0u32;
-    for c in text.bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' | b'\n' | b'\r' | b' ' | b'\t' => continue,
-            _ => return Err("malformed base64 from the server".into()),
-        } as u32;
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Ok(out)
-}
