@@ -579,22 +579,25 @@ pub fn remote_places(t: &Target) -> Result<Vec<Place>, String> {
 /// The local equivalent — home plus the usual user folders.
 pub fn local_places() -> Vec<Place> {
     let mut places = Vec::new();
-    let mut push = |label: &str, p: Option<std::path::PathBuf>| {
-        if let Some(p) = p {
-            if p.is_dir() {
-                places.push(Place {
-                    label: label.to_string(),
-                    path: p.to_string_lossy().into_owned(),
-                });
+    // Scoped so the closure's borrow of `places` ends before the
+    // Windows drive loop below wants it back.
+    {
+        let mut push = |label: &str, p: Option<std::path::PathBuf>| {
+            if let Some(p) = p {
+                if p.is_dir() {
+                    places.push(Place {
+                        label: label.to_string(),
+                        path: p.to_string_lossy().into_owned(),
+                    });
+                }
             }
-        }
-    };
-    push("home", dirs::home_dir());
-    push("desktop", dirs::desktop_dir());
-    push("documents", dirs::document_dir());
-    push("downloads", dirs::download_dir());
-    push("tmp", Some(std::env::temp_dir()));
-    drop(push);
+        };
+        push("home", dirs::home_dir());
+        push("desktop", dirs::desktop_dir());
+        push("documents", dirs::document_dir());
+        push("downloads", dirs::download_dir());
+        push("tmp", Some(std::env::temp_dir()));
+    }
     // Every mounted drive, so the pane can leave the user profile.
     #[cfg(windows)]
     for d in plat::drives() {
@@ -873,7 +876,9 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Inverse of `base64_encode` — the Windows transport carries binary
-/// file contents as base64 text, so it needs both halves.
+/// file contents as base64 text, so it needs both halves. Unix reads
+/// bytes straight off the ssh pipe and never calls this.
+#[cfg(windows)]
 pub fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let mut acc: u32 = 0;
