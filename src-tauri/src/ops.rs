@@ -515,8 +515,9 @@ fn join_remote(dir: &str, name: &str) -> String {
     }
 }
 
-/// Names each item for the progress line, and on Unix also tells the
-/// rsync engine whether a path is safe to hand it.
+/// Tells the rsync engine whether a path is safe to hand it. Windows
+/// has no rsync, and its transfer loop names items with `item_name`.
+#[cfg(not(windows))]
 fn side_path(s: &Side) -> &str {
     match s {
         Side::Local(p) => p,
