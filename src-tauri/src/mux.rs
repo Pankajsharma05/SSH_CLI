@@ -28,8 +28,8 @@
 
 use crate::target::Target;
 use ssh2::{
-    CheckResult, FileStat, KeyboardInteractivePrompt, KnownHostFileKind, KnownHostKeyFormat,
-    Prompt, Session, Sftp,
+    CheckResult, FileStat, KeyboardInteractivePrompt, KnownHostFileKind, Prompt, Session,
+    Sftp,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -249,7 +249,7 @@ fn verify_host(sess: &Session, host: &str, port: u16) -> Result<(), String> {
             if !matches!(answer.as_deref(), Some("yes") | Some("YES") | Some("Yes")) {
                 return Err(format!("host key for {host} was not accepted"));
             }
-            remember_host(&mut known, &path, host, port, key, key_type)
+            remember_host(&path, host, port, key)
         }
         CheckResult::Mismatch => {
             // libssh2 reports a mismatch whenever *some* key is stored for
@@ -303,35 +303,52 @@ fn verify_host(sess: &Session, host: &str, port: u16) -> Result<(), String> {
             if !matches!(answer.as_deref(), Some("yes")) {
                 return Err(format!("host key for {host} was not accepted"));
             }
-            remember_host(&mut known, &path, host, port, key, key_type)
+            remember_host(&path, host, port, key)
         }
         CheckResult::Failure => Err("could not check the host key".into()),
     }
 }
 
-/// Append a host key to known_hosts, leaving every existing entry —
-/// including keys of other types for the same host — in place.
-fn remember_host(
-    known: &mut ssh2::KnownHosts,
-    path: &Path,
-    host: &str,
-    port: u16,
-    key: &[u8],
-    key_type: ssh2::HostKeyType,
-) -> Result<(), String> {
+/// Record a trusted host key by **appending one line** to known_hosts.
+///
+/// libssh2 offers write_file(), but that rewrites the whole file from its
+/// in-memory list: anything it did not parse or cannot represent comes
+/// back changed or not at all. known_hosts belongs to OpenSSH and is
+/// shared with ssh.exe, which the terminal tabs use — rewriting it broke
+/// terminal logins on a real cluster. Appending is what OpenSSH itself
+/// does, and it cannot disturb an existing entry.
+fn remember_host(path: &Path, host: &str, port: u16, key: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+
     let entry = if port == 22 {
         host.to_string()
     } else {
         format!("[{host}]:{port}")
     };
-    known
-        .add(&entry, key, "added by SSH_CLI", KnownHostKeyFormat::from(key_type))
-        .map_err(|e| format!("could not record the host key: {e}"))?;
+    // The key type in a known_hosts line is exactly the algorithm name
+    // stored at the front of the key blob.
+    let alg = key_alg(key).ok_or("the server sent a host key in a format this build cannot record")?;
+    let line = format!("{entry} {alg} {}\n", crate::ops::base64_encode(key));
+
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    known
-        .write_file(path, KnownHostFileKind::OpenSSH)
+    // A file that does not end in a newline would otherwise glue our entry
+    // onto the last one.
+    let needs_newline = std::fs::read(path)
+        .ok()
+        .and_then(|b| b.last().copied())
+        .is_some_and(|b| b != b'\n');
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    if needs_newline {
+        f.write_all(b"\n").map_err(|e| e.to_string())?;
+    }
+    f.write_all(line.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
@@ -1093,6 +1110,42 @@ mod tests {
         assert_ne!(stored, offered_ecdsa);
     }
 
+    /// The field bug: recording a key must never disturb what is already
+    /// in known_hosts, because ssh.exe shares that file and the terminal
+    /// tabs depend on it.
+    #[test]
+    fn appending_a_host_key_preserves_the_file() {
+        let dir = std::env::temp_dir().join(format!("sshcli_kh_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("known_hosts");
+
+        // An existing file whose last line has no trailing newline, and an
+        // ed25519 entry of the kind libssh2 cannot negotiate on Windows.
+        let existing = format!("cluster.example ssh-ed25519 {ED25519}\nother.example ssh-rsa AAAAB3NzaC1yc2E=");
+        std::fs::write(&path, &existing).unwrap();
+
+        let key = b64_decode(ED25519).unwrap();
+        remember_host(&path, "cluster.example", 22, &key).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(&existing), "existing entries were modified:\n{after}");
+        let lines: Vec<&str> = after.lines().collect();
+        assert_eq!(lines.len(), 3, "expected exactly one line added:\n{after}");
+        assert_eq!(lines[0], format!("cluster.example ssh-ed25519 {ED25519}"));
+        assert_eq!(lines[1], "other.example ssh-rsa AAAAB3NzaC1yc2E=");
+        // Appended in OpenSSH's own format: host, key type, base64 key.
+        let added: Vec<&str> = lines[2].split(' ').collect();
+        assert_eq!(added[0], "cluster.example");
+        assert_eq!(added[1], "ssh-ed25519");
+        assert_eq!(b64_decode(added[2]).unwrap(), key);
+
+        // A non-default port is recorded in bracket form.
+        remember_host(&path, "cluster.example", 2222, &key).unwrap();
+        let last = std::fs::read_to_string(&path).unwrap();
+        assert!(last.lines().last().unwrap().starts_with("[cluster.example]:2222 ssh-ed25519 "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn matches_host_entry_forms() {
         assert!(entry_matches_host(Some("10.14.2.12"), "10.14.2.12", 22));
@@ -1101,5 +1154,196 @@ mod tests {
         assert!(!entry_matches_host(Some("10.14.2.13"), "10.14.2.12", 22));
         // Hashed entries have no readable name.
         assert!(!entry_matches_host(None, "10.14.2.12", 22));
+    }
+}
+
+// ---------------------------------------------------------------- shells
+//
+// A terminal tab is a channel on the connection the file panes already
+// authenticated, so opening one costs no second login — the whole point
+// of owning the transport. Reading is a poll rather than a blocking
+// read: libssh2 serialises everything on one session, and a terminal
+// parked in a blocking read would freeze every directory listing and
+// transfer behind it.
+
+struct Shell {
+    channel: ssh2::Channel,
+    conn: Arc<Mutex<Conn>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn shells() -> &'static Mutex<HashMap<u64, Shell>> {
+    static S: OnceLock<Mutex<HashMap<u64, Shell>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Is this terminal id one of ours? Tells `term.rs` whether to route to
+/// the shared session or to a local PTY.
+pub fn shell_exists(id: u64) -> bool {
+    shells().lock().map(|s| s.contains_key(&id)).unwrap_or(false)
+}
+
+/// How long to wait between polls when the shell has nothing to say.
+/// Fast enough to feel like a terminal, slow enough to stay invisible.
+const SHELL_IDLE_POLL: Duration = Duration::from_millis(15);
+
+pub fn shell_open(
+    app: AppHandle,
+    t: &Target,
+    id: u64,
+    rows: u16,
+    cols: u16,
+    cwd: Option<&str>,
+    prelude: Option<&str>,
+) -> Result<(), String> {
+    // Reuses the authenticated connection, or makes it (prompting once).
+    let conn = get(t)?;
+
+    let channel = {
+        let g = conn.lock().map_err(|_| "connection poisoned")?;
+        let mut ch = g
+            .sess
+            .channel_session()
+            .map_err(|e| format!("opening a terminal channel: {e}"))?;
+        ch.request_pty("xterm-256color", None, Some((cols as u32, rows as u32, 0, 0)))
+            .map_err(|e| format!("requesting a pty: {e}"))?;
+
+        // Same shape as the ssh -t command the Unix build uses, so a
+        // start directory, the plot prelude and the session's startup
+        // command all behave identically.
+        let mut pre = String::new();
+        if let Some(d) = cwd.filter(|d| !d.trim().is_empty()) {
+            pre.push_str(&format!("cd {} 2>/dev/null; ", crate::ops::sh_quote(d)));
+        }
+        if let Some(p) = prelude.filter(|p| !p.trim().is_empty()) {
+            pre.push_str(p.trim());
+            if !pre.ends_with(';') {
+                pre.push(';');
+            }
+            pre.push(' ');
+        }
+        if let Some(startup) = &t.startup {
+            pre.push_str(startup);
+            pre.push_str("; ");
+        }
+        if pre.is_empty() {
+            ch.shell().map_err(|e| format!("starting a shell: {e}"))?;
+        } else {
+            pre.push_str("exec $SHELL -l");
+            ch.exec(&pre).map_err(|e| format!("starting a shell: {e}"))?;
+        }
+        ch
+    };
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    shells().lock().map_err(|_| "shell registry poisoned")?.insert(
+        id,
+        Shell { channel: channel.clone(), conn: conn.clone(), stop: stop.clone() },
+    );
+
+    let mut reader = channel;
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        let mut carry: Vec<u8> = Vec::new();
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut got = 0usize;
+            let mut finished = false;
+            {
+                let Ok(g) = conn.lock() else { break };
+                g.sess.set_blocking(false);
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            carry.extend_from_slice(&buf[..n]);
+                            got += n;
+                            if got >= 256 * 1024 {
+                                break; // give the lock back; more next pass
+                            }
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => {
+                            finished = true;
+                            break;
+                        }
+                    }
+                }
+                if reader.eof() {
+                    finished = true;
+                }
+                g.sess.set_blocking(true);
+            }
+
+            // Hold back an incomplete UTF-8 tail so multibyte characters
+            // never get split across two events.
+            if !carry.is_empty() {
+                let valid_to = match std::str::from_utf8(&carry) {
+                    Ok(_) => carry.len(),
+                    Err(e) => e.valid_up_to(),
+                };
+                if valid_to > 0 {
+                    let text = String::from_utf8_lossy(&carry[..valid_to]).into_owned();
+                    let _ = app.emit("term-data", serde_json::json!({ "id": id, "data": text }));
+                    carry.drain(..valid_to);
+                } else if carry.len() > 4 {
+                    let text = String::from_utf8_lossy(&carry).into_owned();
+                    let _ = app.emit("term-data", serde_json::json!({ "id": id, "data": text }));
+                    carry.clear();
+                }
+            }
+
+            if finished {
+                break;
+            }
+            if got == 0 {
+                std::thread::sleep(SHELL_IDLE_POLL);
+            }
+        }
+        let _ = app.emit("term-exit", serde_json::json!({ "id": id }));
+        shells().lock().ok().map(|mut s| s.remove(&id));
+    });
+
+    Ok(())
+}
+
+pub fn shell_write(id: u64, data: &str) -> Result<(), String> {
+    let (channel, conn) = {
+        let s = shells().lock().map_err(|_| "shell registry poisoned")?;
+        let sh = s.get(&id).ok_or("no such terminal")?;
+        (sh.channel.clone(), sh.conn.clone())
+    };
+    let g = conn.lock().map_err(|_| "connection poisoned")?;
+    let mut ch = channel;
+    g.sess.set_blocking(true);
+    ch.write_all(data.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    ch.flush().map_err(|e| format!("flush: {e}"))
+}
+
+pub fn shell_resize(id: u64, rows: u16, cols: u16) -> Result<(), String> {
+    let (channel, conn) = {
+        let s = shells().lock().map_err(|_| "shell registry poisoned")?;
+        let sh = s.get(&id).ok_or("no such terminal")?;
+        (sh.channel.clone(), sh.conn.clone())
+    };
+    let g = conn.lock().map_err(|_| "connection poisoned")?;
+    let mut ch = channel;
+    g.sess.set_blocking(true);
+    ch.request_pty_size(cols as u32, rows as u32, None, None)
+        .map_err(|e| format!("resize: {e}"))
+}
+
+pub fn shell_close(id: u64) {
+    let sh = shells().lock().ok().and_then(|mut s| s.remove(&id));
+    if let Some(sh) = sh {
+        sh.stop.store(true, Ordering::Relaxed);
+        if let Ok(g) = sh.conn.lock() {
+            g.sess.set_blocking(true);
+            let mut ch = sh.channel;
+            let _ = ch.close();
+        }
     }
 }

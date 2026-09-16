@@ -116,6 +116,18 @@ pub fn open_ssh(
     cols: u16,
     prelude: Option<&str>,
 ) -> Result<u64, String> {
+    // On Windows the app owns the SSH connection, so a terminal is just
+    // another channel on it — no second ssh.exe, no second login, and no
+    // second opinion about host keys.
+    #[cfg(windows)]
+    {
+        let id = state.next_id.fetch_add(1, Ordering::SeqCst);
+        crate::mux::shell_open(app, t, id, rows, cols, cwd, prelude)?;
+        return Ok(id);
+    }
+
+    #[cfg(not(windows))]
+    {
     let mut cmd = CommandBuilder::new(plat::ssh_exe());
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -155,6 +167,7 @@ pub fn open_ssh(
     }
 
     spawn(app, state, cmd, rows, cols)
+    }
 }
 
 /// Spawn the user's login shell on this machine under a PTY — the same
@@ -208,6 +221,10 @@ pub fn open_local(
 }
 
 pub fn write(state: &AppState, id: u64, data: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    if crate::mux::shell_exists(id) {
+        return crate::mux::shell_write(id, data);
+    }
     let mut terms = state.terms.lock().unwrap();
     let t = terms.get_mut(&id).ok_or("no such terminal")?;
     t.writer
@@ -218,6 +235,10 @@ pub fn write(state: &AppState, id: u64, data: &str) -> Result<(), String> {
 }
 
 pub fn resize(state: &AppState, id: u64, rows: u16, cols: u16) -> Result<(), String> {
+    #[cfg(windows)]
+    if crate::mux::shell_exists(id) {
+        return crate::mux::shell_resize(id, rows, cols);
+    }
     let terms = state.terms.lock().unwrap();
     let t = terms.get(&id).ok_or("no such terminal")?;
     t.master
@@ -226,6 +247,11 @@ pub fn resize(state: &AppState, id: u64, rows: u16, cols: u16) -> Result<(), Str
 }
 
 pub fn close(state: &AppState, id: u64) -> Result<(), String> {
+    #[cfg(windows)]
+    if crate::mux::shell_exists(id) {
+        crate::mux::shell_close(id);
+        return Ok(());
+    }
     let mut terms = state.terms.lock().unwrap();
     if let Some(mut t) = terms.remove(&id) {
         let _ = t.child.kill();
