@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use crate::ops;
 use crate::plat;
 use crate::state::AppState;
@@ -123,7 +124,7 @@ pub fn open_ssh(
     {
         let id = state.next_id.fetch_add(1, Ordering::SeqCst);
         crate::mux::shell_open(app, t, id, rows, cols, cwd, prelude)?;
-        return Ok(id);
+        Ok(id)
     }
 
     #[cfg(not(windows))]
