@@ -84,6 +84,13 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --release --all-targets -- -D warnings
 
+      # Unit tests for the fiddly pure logic — path naming across the
+      # Windows/POSIX boundary, host-key algorithm parsing. They run on
+      # every platform, and the Windows-only ones only exist here.
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --release
+
       - name: Check the binary is complete
         if: runner.os == 'Linux'
         run: |

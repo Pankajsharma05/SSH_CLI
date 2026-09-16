@@ -249,37 +249,127 @@ fn verify_host(sess: &Session, host: &str, port: u16) -> Result<(), String> {
             if !matches!(answer.as_deref(), Some("yes") | Some("YES") | Some("Yes")) {
                 return Err(format!("host key for {host} was not accepted"));
             }
-            let entry = if port == 22 {
-                host.to_string()
-            } else {
-                format!("[{host}]:{port}")
-            };
-            known
-                .add(
-                    &entry,
-                    key,
-                    "added by SSH_CLI",
-                    KnownHostKeyFormat::from(key_type),
-                )
-                .map_err(|e| format!("could not record the host key: {e}"))?;
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            known
-                .write_file(&path, KnownHostFileKind::OpenSSH)
-                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
-            Ok(())
+            remember_host(&mut known, &path, host, port, key, key_type)
         }
-        CheckResult::Mismatch => Err(format!(
-            "WARNING: the host key for {host} does not match the one in \
-             known_hosts.\n\nOffered fingerprint: {fingerprint}\n\n\
-             This is expected after a server rebuild, and is also exactly what \
-             a machine-in-the-middle looks like. Verify the fingerprint with \
-             your administrators, then use “Remove old host key” in the session \
-             menu if it is genuinely a new key."
-        )),
+        CheckResult::Mismatch => {
+            // libssh2 reports a mismatch whenever *some* key is stored for
+            // this host and the offered one differs. That includes the
+            // ordinary case where the stored key is of a type this build
+            // cannot negotiate: OpenSSH writes an ed25519 key, and libssh2
+            // on Windows' native crypto has no ed25519, so the server
+            // offers ECDSA or RSA instead. Nothing has changed.
+            //
+            // Only a stored key of the *same* algorithm that differs is
+            // alarming. Otherwise ask, exactly as OpenSSH does when it meets
+            // a host key type it has not seen for a host before.
+            let offered_alg = key_alg(key);
+            let same_alg_stored = known
+                .hosts()
+                .map(|hosts| {
+                    hosts.iter().any(|h| {
+                        entry_matches_host(h.name(), host, port)
+                            && b64_decode(h.key()).as_deref().and_then(key_alg) == offered_alg
+                    })
+                })
+                .unwrap_or(false);
+
+            if same_alg_stored {
+                return Err(format!(
+                    "WARNING: the host key for {host} does not match the one in \
+                     known_hosts.\n\nOffered fingerprint: {fingerprint}\n\n\
+                     This is expected after a server rebuild, and is also exactly \
+                     what a machine-in-the-middle looks like. Verify the \
+                     fingerprint with your administrators, then use \u{201c}Remove old \
+                     host key\u{201d} in the session menu if it is genuinely a new key."
+                ));
+            }
+
+            let alg = offered_alg.unwrap_or_else(|| "this".into());
+            let answer = ask(
+                "hostkey",
+                host,
+                &format!("Trust the {alg} key for {host}?"),
+                &format!(
+                    "{host} is already in your known_hosts, but with a key of a \
+                     different type, which this app cannot use \u{2014} Windows' \
+                     built-in crypto does not implement it.\n\n\
+                     The same server also offers this {alg} key:\n  {fingerprint}\n\n\
+                     If that fingerprint matches what your administrators publish, \
+                     trusting it is safe: it adds a second entry and leaves your \
+                     existing one untouched."
+                ),
+                true,
+            );
+            if !matches!(answer.as_deref(), Some("yes")) {
+                return Err(format!("host key for {host} was not accepted"));
+            }
+            remember_host(&mut known, &path, host, port, key, key_type)
+        }
         CheckResult::Failure => Err("could not check the host key".into()),
     }
+}
+
+/// Append a host key to known_hosts, leaving every existing entry —
+/// including keys of other types for the same host — in place.
+fn remember_host(
+    known: &mut ssh2::KnownHosts,
+    path: &Path,
+    host: &str,
+    port: u16,
+    key: &[u8],
+    key_type: ssh2::HostKeyType,
+) -> Result<(), String> {
+    let entry = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    known
+        .add(&entry, key, "added by SSH_CLI", KnownHostKeyFormat::from(key_type))
+        .map_err(|e| format!("could not record the host key: {e}"))?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    known
+        .write_file(path, KnownHostFileKind::OpenSSH)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// The algorithm name carried at the front of an SSH public key blob: a
+/// 4-byte big-endian length followed by e.g. `ssh-ed25519`.
+fn key_alg(blob: &[u8]) -> Option<String> {
+    let len = u32::from_be_bytes(blob.get(..4)?.try_into().ok()?) as usize;
+    String::from_utf8(blob.get(4..4 + len)?.to_vec()).ok()
+}
+
+/// Does a known_hosts entry refer to this host? Entries are a plain name,
+/// a `[name]:port` form, or a comma-separated list. Hashed entries expose
+/// no readable name and count as "not this host" — at worst that costs one
+/// extra trust prompt.
+fn entry_matches_host(name: Option<&str>, host: &str, port: u16) -> bool {
+    let Some(name) = name else { return false };
+    let bracketed = format!("[{host}]:{port}");
+    name.split(',').any(|n| n.trim() == host || n.trim() == bracketed)
+}
+
+/// Stored keys come back base64; the algorithm is inside the decoded blob.
+fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let (mut acc, mut bits) = (0u32, 0u32);
+    let mut out = Vec::new();
+    for c in text.bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        let v = T.iter().position(|&t| t == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Agent first, then a configured key, then whatever the server will
@@ -962,4 +1052,54 @@ pub fn local_size(path: &Path) -> u64 {
 
 fn b64_std(data: &[u8]) -> String {
     crate::ops::base64_encode(data).trim_end_matches('=').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real ed25519 host key blob, base64 as it appears in known_hosts.
+    const ED25519: &str =
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJ1DbWGNP1IAPoyDs6bxPlhFPCdHEUEAu0OEZxIU0AZs";
+
+    #[test]
+    fn reads_the_algorithm_out_of_a_key_blob() {
+        let blob = b64_decode(ED25519).expect("decodes");
+        assert_eq!(key_alg(&blob).as_deref(), Some("ssh-ed25519"));
+        // Truncated or empty input must not panic.
+        assert_eq!(key_alg(&[]), None);
+        assert_eq!(key_alg(&[0, 0, 0, 200, b'x']), None);
+    }
+
+    #[test]
+    fn base64_round_trips_against_the_encoder() {
+        for sample in [&b""[..], b"a", b"ab", b"abc", b"hello world", &[0u8, 255, 17][..]] {
+            let encoded = crate::ops::base64_encode(sample);
+            assert_eq!(b64_decode(&encoded).as_deref(), Some(sample), "{encoded}");
+        }
+    }
+
+    /// The bug from the field: an ed25519 entry written by OpenSSH and an
+    /// ECDSA key offered to libssh2 are *different types*, not a changed
+    /// key, and must not be treated as a mismatch.
+    #[test]
+    fn different_key_types_are_not_the_same_algorithm() {
+        let stored = key_alg(&b64_decode(ED25519).unwrap());
+        let offered_ecdsa = key_alg(
+            &b64_decode("AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTY=").unwrap(),
+        );
+        assert_eq!(stored.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(offered_ecdsa.as_deref(), Some("ecdsa-sha2-nistp256"));
+        assert_ne!(stored, offered_ecdsa);
+    }
+
+    #[test]
+    fn matches_host_entry_forms() {
+        assert!(entry_matches_host(Some("10.14.2.12"), "10.14.2.12", 22));
+        assert!(entry_matches_host(Some("[10.14.2.12]:2222"), "10.14.2.12", 2222));
+        assert!(entry_matches_host(Some("alias,10.14.2.12"), "10.14.2.12", 22));
+        assert!(!entry_matches_host(Some("10.14.2.13"), "10.14.2.12", 22));
+        // Hashed entries have no readable name.
+        assert!(!entry_matches_host(None, "10.14.2.12", 22));
+    }
 }
