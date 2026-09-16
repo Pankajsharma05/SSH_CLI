@@ -1,5 +1,7 @@
 # build output
 dist/
+# scratch folder for binaries pulled down from CI
+dist-windows/
 src-tauri/target/
 src-tauri/gen/
 
