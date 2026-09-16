@@ -67,17 +67,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Build exe + NSIS installer
-        # NOTE: unsigned. SmartScreen will warn on first run.
-        # See docs/SIGNING.md.
+      # The plain executable is the release; it must succeed.
+      # NOTE: unsigned. SmartScreen will warn on first run. See docs/SIGNING.md.
+      - name: Build exe
+        run: .\build_windows.ps1
+        shell: pwsh
+
+      # The installer is a convenience. Bundling pulls in the tauri CLI and
+      # NSIS, so it has more ways to fail than the build itself — never at
+      # the cost of shipping the binary.
+      - name: Build the NSIS installer
+        continue-on-error: true
         run: .\build_windows.ps1 -Installer
         shell: pwsh
+
       - name: Name the artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item dist\ssh_cli.exe out\ssh_cli-windows-x86_64.exe
-          Get-ChildItem dist\*setup.exe | ForEach-Object { Copy-Item $_.FullName out\ }
+          Get-ChildItem dist\*setup.exe -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName out\ }
           Get-FileHash out\* -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
             Set-Content out\SHA256SUMS-windows.txt

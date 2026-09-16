@@ -14,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION=1.0.0
+VERSION=1.1.0
 UNIVERSAL=0; DMG=0; INSTALL=0
 for arg in "$@"; do
   case "$arg" in

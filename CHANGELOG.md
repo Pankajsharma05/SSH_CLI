@@ -4,51 +4,54 @@ All notable changes to SSH_CLI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] — 2026-09-16
 
-### Added — Windows support
-- **Windows build** (`build_windows.ps1`, plus a `windows-latest` job in CI and
-  the release workflow, producing `ssh_cli.exe` and an NSIS installer).
-- `plat.rs` — one home for platform differences: which `ssh.exe` to run,
-  spawning children without flashing console windows, default-app openers,
-  the local shell, and free-space queries.
-- `mux.rs` — an **in-process SSH transport** for Windows, where `ControlMaster`
-  does not exist. libssh2 opens one connection per host and multiplexes an
-  SFTP channel plus exec channels over it, the way WinSCP does. Because the
-  app owns the connection it also owns the login: **passwords, key
-  passphrases and keyboard-interactive 2FA are prompted in the app**, so
-  Windows no longer requires key-based authentication.
-- File operations on Windows are SFTP requests rather than shell commands:
-  listings use directory attributes (no GNU `find` dependency), transfers
-  report real byte progress and can be cancelled mid-copy, and `chmod` is
-  an SFTP `SETSTAT`.
+Windows support, built on a different transport from the Unix builds.
+
+### Added
+- **Windows build** — `build_windows.ps1`, a `windows-latest` job in CI and in
+  the release workflow, producing `ssh_cli.exe`.
+- `mux.rs` — an **in-process SSH transport**, because Windows OpenSSH has no
+  `ControlMaster` and the login-once model cannot be built out of `ssh.exe`
+  there. libssh2 opens one connection per host and multiplexes an SFTP
+  channel, exec channels and terminal PTY channels over it, the way WinSCP
+  does. libssh2 uses the native WinCNG crypto, so no OpenSSL is pulled in.
+- **One login serves everything.** Because the app owns the connection it owns
+  the login: passwords, key passphrases and keyboard-interactive 2FA are
+  prompted in the app, and the file panes, transfers and terminal tabs all
+  ride the same authenticated session. Keys are not required.
+- File operations are SFTP requests rather than shell commands: listings come
+  from directory attributes (no GNU `find` dependency, so odd servers work),
+  transfers report real byte progress and cancel mid-copy, `chmod` is an
+  SFTP `SETSTAT`.
 - Host keys are checked against `%USERPROFILE%\.ssh\known_hosts`, with a
-  fingerprint prompt on first contact and a hard refusal if a known key
-  changes.
+  fingerprint prompt on first contact. The check is algorithm-aware: a stored
+  key of the *same* type that differs is refused, while a host known only by a
+  type this build cannot negotiate is offered for review — which is what
+  OpenSSH does. Trusted keys are **appended**, never rewritten, so the file
+  stays sound for `ssh.exe`.
+- `plat.rs` — one home for the smaller platform differences: which `ssh.exe`
+  to run, spawning without flashing console windows, the default-app opener,
+  the local shell, free-space queries, drive enumeration.
 - Local terminal tabs run PowerShell 7 → Windows PowerShell → `cmd.exe`
-  through ConPTY, rather than `portable-pty`'s `cmd.exe` default.
+  through ConPTY.
 - The local pane understands `C:\...` paths: breadcrumbs start at the drive,
   the places menu lists every mounted drive, and the free-space footer reads
   `GetDiskFreeSpaceExW`.
-- [`docs/WINDOWS.md`](docs/WINDOWS.md) — how the in-process transport works
-  and what still differs from the Unix builds.
+- [`docs/WINDOWS.md`](docs/WINDOWS.md) explains the transport and what differs.
 
 ### Fixed
-- Windows OpenSSH aborts with `getsockname failed: Not a socket` when a user's
-  `~/.ssh/config` enables `ControlMaster` globally. Omitting the app's own
-  multiplex flags is not enough, so the Windows build now passes an explicit
-  `-o ControlMaster=no -o ControlPath=none` to override the config file.
-- `%SystemRoot%\System32\OpenSSH\ssh.exe` is preferred over whatever `ssh`
-  is first on `PATH`, which is often Git for Windows' MSYS2 build — that one
-  cannot reach the Windows `ssh-agent` named pipe, so agent-held keys silently
-  went unused.
+- A failure during start-up left a blank window with no explanation. Uncaught
+  errors now paint a readable panel; after start-up they are a toast, so one
+  denied call cannot replace the interface.
+- The window could not be dragged by its title bar — the capability grants
+  `core:default`, which does not include `core:window:allow-start-dragging`.
 
 ### Known limitations on Windows
-- Terminal tabs still run `ssh.exe`, so they authenticate separately from the
-  file panes — a second 2FA code on clusters that demand one.
-- ProxyJump bastions are not supported by the in-process transport yet.
+- ProxyJump bastions are not supported by the in-process transport; those
+  sessions are refused with an explanation. WSL2 remains the workaround.
 - Servers with the SFTP subsystem disabled are refused.
-- The `rsync` transfer engine is unavailable; SFTP is used instead.
+- The `rsync` engine is unavailable; SFTP is used instead.
 - Local `chmod` is not offered (no POSIX mode bits on NTFS).
 
 ## [1.0.0] — 2026-09-15

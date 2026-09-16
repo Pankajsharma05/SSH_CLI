@@ -1,6 +1,6 @@
 [package]
 name = "ssh_cli"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Pankaj Sharma"]
 description = "SSH_CLI — dual-pane SSH file manager with remote and local terminals, built for cluster work"

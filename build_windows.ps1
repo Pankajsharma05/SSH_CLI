@@ -25,7 +25,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
-$Version = "1.0.0"
+$Version = "1.1.0"
 function Bold($m) { Write-Host $m -ForegroundColor Cyan }
 
 # ---- 0. prerequisites ----------------------------------------------
