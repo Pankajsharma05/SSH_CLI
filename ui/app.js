@@ -678,7 +678,9 @@ async function boot() {
   wireTerminalEvents();
   wireEditEvents();
   wireFileDrop();
-  wireAuthPrompts();
+  // Awaited: nothing below may run before the backend can reach us with
+  // an authentication prompt.
+  await wireAuthPrompts();
   document.addEventListener("keydown", onKeyDown, true);
 
   $("#btn-rsync").classList.toggle("toggled", !!ui.settings.rsync);

@@ -216,8 +216,14 @@ const alertModal = (title, message) => modal({ title, message, okLabel: "OK" });
 // overwrite the first.
 let authQueue = Promise.resolve();
 
+/// Returns the listen() promise so boot can *await* it. Registering a
+/// listener is itself an IPC round trip, and Tauri drops events that
+/// arrive before it completes. The first thing the app does is load the
+/// panes, which on Windows dials the cluster and asks for a password —
+/// so an unawaited registration loses that very first prompt and the
+/// pane waits on an answer that can never come.
 function wireAuthPrompts() {
-  listen("auth-prompt", (ev) => {
+  return listen("auth-prompt", (ev) => {
     const p = ev.payload || {};
     authQueue = authQueue.then(() => askAuth(p)).catch(() => {});
   });

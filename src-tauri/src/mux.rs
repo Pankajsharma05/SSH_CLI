@@ -48,8 +48,11 @@ use tauri::{AppHandle, Emitter};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const OP_TIMEOUT_MS: u32 = 60_000;
 
-/// How long a prompt waits for the human before giving up.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a prompt waits for the human before giving up. Long enough
+/// to fish a phone out of a pocket for a 2FA code, short enough that a
+/// prompt which never reached the UI surfaces as an error instead of an
+/// apparent hang.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(90);
 
 // ---------------------------------------------------------------- app handle
 // The transport needs to talk to the UI (auth prompts, host-key trust),
@@ -70,6 +73,7 @@ fn app() -> Option<&'static AppHandle> {
 // worker thread until `answer` is called from the `auth_reply` command.
 
 static NEXT_PROMPT: AtomicU64 = AtomicU64::new(1);
+static ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 type Pending = Mutex<HashMap<u64, SyncSender<Option<String>>>>;
 
@@ -80,6 +84,7 @@ fn pending() -> &'static Pending {
 
 /// Answer an outstanding prompt. `None` means the user cancelled.
 pub fn answer(id: u64, text: Option<String>) {
+    ANSWERED.store(true, Ordering::Relaxed);
     let tx = pending().lock().ok().and_then(|mut m| m.remove(&id));
     if let Some(tx) = tx {
         let _ = tx.send(text);
@@ -115,6 +120,13 @@ fn ask(kind: &str, target: &str, title: &str, prompt: &str, echo: bool) -> Optio
             None
         }
     }
+}
+
+/// Did the interface ever answer a prompt? Used to tell "you cancelled"
+/// apart from "the dialog never reached you", which look identical from
+/// down here and need very different advice.
+fn prompts_answered() -> bool {
+    ANSWERED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------- connections
@@ -321,7 +333,7 @@ fn authenticate(sess: &Session, user: &str, host: &str, t: &Target) -> Result<()
             return Ok(());
         }
         if prompter.cancelled {
-            return Err("authentication cancelled".into());
+            return Err(no_answer_error());
         }
     }
 
@@ -338,7 +350,7 @@ fn authenticate(sess: &Session, user: &str, host: &str, t: &Target) -> Result<()
             }
             return Err(format!("{user}@{host}: password rejected"));
         }
-        return Err("authentication cancelled".into());
+        return Err(no_answer_error());
     }
 
     if sess.authenticated() {
@@ -348,6 +360,17 @@ fn authenticate(sess: &Session, user: &str, host: &str, t: &Target) -> Result<()
         "could not authenticate to {user}@{host}. The server offered: {}",
         if methods.is_empty() { "nothing usable" } else { &methods }
     ))
+}
+
+fn no_answer_error() -> String {
+    if prompts_answered() {
+        "authentication cancelled".into()
+    } else {
+        "the password prompt never reached the window, so the login could not \
+         be completed. Please report this — it is a bug in SSH_CLI, not in \
+         your cluster account."
+            .into()
+    }
 }
 
 /// Feeds the server's keyboard-interactive challenges to the UI. This is

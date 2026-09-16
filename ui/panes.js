@@ -294,7 +294,11 @@ async function handleLoadError(pane, e) {
 
 async function loadPane(pane, path) {
   if (!path) return;
-  renderMessage(pane, "loading…");
+  // On Windows the first touch of a host opens the connection and may
+  // put a password or 2FA dialog on screen, which can take a while —
+  // say what is happening rather than a bare "loading".
+  const connecting = pane.target && !hostFacts.has(pane.target);
+  renderMessage(pane, connecting ? `connecting to ${pane.target}…` : "loading…");
   let entries;
   try {
     entries = pane.target
