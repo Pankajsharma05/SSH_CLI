@@ -12,8 +12,24 @@ if (IS_WIN) document.documentElement.classList.add("is-win");
 // A thrown error during start-up used to leave an empty window with no
 // clue what happened — the worst possible thing to debug remotely. Show
 // it on screen instead, and keep a copy the user can copy out.
+let booted = false;
+function markBooted() { booted = true; }
+
 function fatal(err, where) {
   const text = (err && (err.stack || err.message)) || String(err);
+
+  // Once the app is up, a single failed call is not a reason to replace
+  // the interface with an error page — that turns a denied permission or
+  // one unlucky request into what looks like a crash. Say it quietly and
+  // carry on; only a failure during start-up, where there is nothing to
+  // carry on with, takes the window.
+  if (booted) {
+    console.error(where || "error", err);
+    try {
+      toast(text.split("\n")[0].slice(0, 160), "error");
+    } catch (_) {}
+    return;
+  }
   let box = document.getElementById("fatal");
   if (!box) {
     box = document.createElement("div");

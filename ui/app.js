@@ -728,6 +728,7 @@ async function boot() {
   }));
 
   updateTermEmpty();
+  markBooted();
   toast(`ready — ${MOD}K for commands, ${MOD}3 for a full terminal`);
 }
 

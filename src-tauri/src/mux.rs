@@ -1071,92 +1071,6 @@ fn b64_std(data: &[u8]) -> String {
     crate::ops::base64_encode(data).trim_end_matches('=').to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A real ed25519 host key blob, base64 as it appears in known_hosts.
-    const ED25519: &str =
-        "AAAAC3NzaC1lZDI1NTE5AAAAIJ1DbWGNP1IAPoyDs6bxPlhFPCdHEUEAu0OEZxIU0AZs";
-
-    #[test]
-    fn reads_the_algorithm_out_of_a_key_blob() {
-        let blob = b64_decode(ED25519).expect("decodes");
-        assert_eq!(key_alg(&blob).as_deref(), Some("ssh-ed25519"));
-        // Truncated or empty input must not panic.
-        assert_eq!(key_alg(&[]), None);
-        assert_eq!(key_alg(&[0, 0, 0, 200, b'x']), None);
-    }
-
-    #[test]
-    fn base64_round_trips_against_the_encoder() {
-        for sample in [&b""[..], b"a", b"ab", b"abc", b"hello world", &[0u8, 255, 17][..]] {
-            let encoded = crate::ops::base64_encode(sample);
-            assert_eq!(b64_decode(&encoded).as_deref(), Some(sample), "{encoded}");
-        }
-    }
-
-    /// The bug from the field: an ed25519 entry written by OpenSSH and an
-    /// ECDSA key offered to libssh2 are *different types*, not a changed
-    /// key, and must not be treated as a mismatch.
-    #[test]
-    fn different_key_types_are_not_the_same_algorithm() {
-        let stored = key_alg(&b64_decode(ED25519).unwrap());
-        let offered_ecdsa = key_alg(
-            &b64_decode("AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTY=").unwrap(),
-        );
-        assert_eq!(stored.as_deref(), Some("ssh-ed25519"));
-        assert_eq!(offered_ecdsa.as_deref(), Some("ecdsa-sha2-nistp256"));
-        assert_ne!(stored, offered_ecdsa);
-    }
-
-    /// The field bug: recording a key must never disturb what is already
-    /// in known_hosts, because ssh.exe shares that file and the terminal
-    /// tabs depend on it.
-    #[test]
-    fn appending_a_host_key_preserves_the_file() {
-        let dir = std::env::temp_dir().join(format!("sshcli_kh_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("known_hosts");
-
-        // An existing file whose last line has no trailing newline, and an
-        // ed25519 entry of the kind libssh2 cannot negotiate on Windows.
-        let existing = format!("cluster.example ssh-ed25519 {ED25519}\nother.example ssh-rsa AAAAB3NzaC1yc2E=");
-        std::fs::write(&path, &existing).unwrap();
-
-        let key = b64_decode(ED25519).unwrap();
-        remember_host(&path, "cluster.example", 22, &key).unwrap();
-
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(after.starts_with(&existing), "existing entries were modified:\n{after}");
-        let lines: Vec<&str> = after.lines().collect();
-        assert_eq!(lines.len(), 3, "expected exactly one line added:\n{after}");
-        assert_eq!(lines[0], format!("cluster.example ssh-ed25519 {ED25519}"));
-        assert_eq!(lines[1], "other.example ssh-rsa AAAAB3NzaC1yc2E=");
-        // Appended in OpenSSH's own format: host, key type, base64 key.
-        let added: Vec<&str> = lines[2].split(' ').collect();
-        assert_eq!(added[0], "cluster.example");
-        assert_eq!(added[1], "ssh-ed25519");
-        assert_eq!(b64_decode(added[2]).unwrap(), key);
-
-        // A non-default port is recorded in bracket form.
-        remember_host(&path, "cluster.example", 2222, &key).unwrap();
-        let last = std::fs::read_to_string(&path).unwrap();
-        assert!(last.lines().last().unwrap().starts_with("[cluster.example]:2222 ssh-ed25519 "));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn matches_host_entry_forms() {
-        assert!(entry_matches_host(Some("10.14.2.12"), "10.14.2.12", 22));
-        assert!(entry_matches_host(Some("[10.14.2.12]:2222"), "10.14.2.12", 2222));
-        assert!(entry_matches_host(Some("alias,10.14.2.12"), "10.14.2.12", 22));
-        assert!(!entry_matches_host(Some("10.14.2.13"), "10.14.2.12", 22));
-        // Hashed entries have no readable name.
-        assert!(!entry_matches_host(None, "10.14.2.12", 22));
-    }
-}
-
 // ---------------------------------------------------------------- shells
 //
 // A terminal tab is a channel on the connection the file panes already
@@ -1345,5 +1259,91 @@ pub fn shell_close(id: u64) {
             let mut ch = sh.channel;
             let _ = ch.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real ed25519 host key blob, base64 as it appears in known_hosts.
+    const ED25519: &str =
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJ1DbWGNP1IAPoyDs6bxPlhFPCdHEUEAu0OEZxIU0AZs";
+
+    #[test]
+    fn reads_the_algorithm_out_of_a_key_blob() {
+        let blob = b64_decode(ED25519).expect("decodes");
+        assert_eq!(key_alg(&blob).as_deref(), Some("ssh-ed25519"));
+        // Truncated or empty input must not panic.
+        assert_eq!(key_alg(&[]), None);
+        assert_eq!(key_alg(&[0, 0, 0, 200, b'x']), None);
+    }
+
+    #[test]
+    fn base64_round_trips_against_the_encoder() {
+        for sample in [&b""[..], b"a", b"ab", b"abc", b"hello world", &[0u8, 255, 17][..]] {
+            let encoded = crate::ops::base64_encode(sample);
+            assert_eq!(b64_decode(&encoded).as_deref(), Some(sample), "{encoded}");
+        }
+    }
+
+    /// The bug from the field: an ed25519 entry written by OpenSSH and an
+    /// ECDSA key offered to libssh2 are *different types*, not a changed
+    /// key, and must not be treated as a mismatch.
+    #[test]
+    fn different_key_types_are_not_the_same_algorithm() {
+        let stored = key_alg(&b64_decode(ED25519).unwrap());
+        let offered_ecdsa = key_alg(
+            &b64_decode("AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTY=").unwrap(),
+        );
+        assert_eq!(stored.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(offered_ecdsa.as_deref(), Some("ecdsa-sha2-nistp256"));
+        assert_ne!(stored, offered_ecdsa);
+    }
+
+    /// The field bug: recording a key must never disturb what is already
+    /// in known_hosts, because ssh.exe shares that file and the terminal
+    /// tabs depend on it.
+    #[test]
+    fn appending_a_host_key_preserves_the_file() {
+        let dir = std::env::temp_dir().join(format!("sshcli_kh_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("known_hosts");
+
+        // An existing file whose last line has no trailing newline, and an
+        // ed25519 entry of the kind libssh2 cannot negotiate on Windows.
+        let existing = format!("cluster.example ssh-ed25519 {ED25519}\nother.example ssh-rsa AAAAB3NzaC1yc2E=");
+        std::fs::write(&path, &existing).unwrap();
+
+        let key = b64_decode(ED25519).unwrap();
+        remember_host(&path, "cluster.example", 22, &key).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(&existing), "existing entries were modified:\n{after}");
+        let lines: Vec<&str> = after.lines().collect();
+        assert_eq!(lines.len(), 3, "expected exactly one line added:\n{after}");
+        assert_eq!(lines[0], format!("cluster.example ssh-ed25519 {ED25519}"));
+        assert_eq!(lines[1], "other.example ssh-rsa AAAAB3NzaC1yc2E=");
+        // Appended in OpenSSH's own format: host, key type, base64 key.
+        let added: Vec<&str> = lines[2].split(' ').collect();
+        assert_eq!(added[0], "cluster.example");
+        assert_eq!(added[1], "ssh-ed25519");
+        assert_eq!(b64_decode(added[2]).unwrap(), key);
+
+        // A non-default port is recorded in bracket form.
+        remember_host(&path, "cluster.example", 2222, &key).unwrap();
+        let last = std::fs::read_to_string(&path).unwrap();
+        assert!(last.lines().last().unwrap().starts_with("[cluster.example]:2222 ssh-ed25519 "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matches_host_entry_forms() {
+        assert!(entry_matches_host(Some("10.14.2.12"), "10.14.2.12", 22));
+        assert!(entry_matches_host(Some("[10.14.2.12]:2222"), "10.14.2.12", 2222));
+        assert!(entry_matches_host(Some("alias,10.14.2.12"), "10.14.2.12", 22));
+        assert!(!entry_matches_host(Some("10.14.2.13"), "10.14.2.12", 22));
+        // Hashed entries have no readable name.
+        assert!(!entry_matches_host(None, "10.14.2.12", 22));
     }
 }
